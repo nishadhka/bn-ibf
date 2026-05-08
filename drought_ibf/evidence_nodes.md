@@ -69,15 +69,67 @@ with the relevant column of $L$ and renormalising.
 | Node | What it is | Source | Soft prob columns | Time coverage | Used in current run |
 |---|---|---|---|---|---|
 | `cur` (current SPI-3) | Observed SPI-3 ending at the BN init month | ERA5 SPI zarr (`era5_ecmwf_pencil`) | `cur_p1..cur_p5` (5 states: Severe / Moderate / Mild Drought / Normal / Above_Normal — column order REVERSED relative to STATES order, see `_REVERSE_NODES` in `drought_data_prep.py`) | **1940-01 → 2026-01** | ✓ |
-| `def` (forecast deficit prob) | Probability that the SEAS5 ensemble's seasonal SPI-3 falls below the deficit threshold (default `--deficit-spi=-1.0`) at the row's target-season lead | SEAS5 SPI-3 icechunk (`seas51_spi3_10km_icechunk_v2`, first 25 ensemble members for full hindcast coverage) | `def_p1..def_p5` (5 states: Very_Low / Low / Medium / High / Very_High) | **1981-01 → 2026-04** | ✓ |
-| `spa` (spatial coverage) | Fraction of the admin-1 polygon that is in seasonal-deficit hotspot in the SEAS5 forecast | SEAS5 SPI-3 icechunk (zonal reduction over admin-1 mask) | `spa_p1..spa_p3` (3 states: Localized / Moderate / Widespread) | 1981-01 → 2026-04 | ✓ |
+| `def` (forecast deficit prob) | **Empirical probability across the 25 SEAS5 ensemble members of crossing the per-pixel ERA5-fitted SPI-3 return-period threshold** at the row's target-season lead, then zonally averaged over the admin-1 polygon. v2 uses the RP threshold; v1 used a scalar `--deficit-spi=-1.0` instead | SEAS5 SPI-3 icechunk (`seas51_spi3_10km_icechunk_v2`, first 25 members for full 1981-now hindcast coverage) **AND** ERA5 SPI return-period icechunk (`era5_ecmwf_rp_icechunk`, 5-yr fitted threshold by default; selectable via `--rp-years`) | `def_p1..def_p5` (5 states: Very_Low / Low / Medium / High / Very_High); raw value in `forecast_deficit_prob`; threshold lineage recorded in `deficit_threshold_source` (e.g. `era5_ecmwf_rp_icechunk:5yr fitted`) | **1981-01 → 2026-04** | ✓ |
+| `spa` (spatial coverage) | Fraction of the admin-1 polygon's pixels where the RP exceedance is widespread. Combines two sub-metrics over the same SEAS5-vs-RP boolean field as `def`: `spatial_coverage` = fraction of pixels where the majority of members crosses RP (`p_def_l1 > 0.5`); `hotspot_fraction` = fraction of pixels where **any** member crosses RP (`crosses_rp_any`) | SEAS5 SPI-3 + ERA5 RP icechunk (zonal reductions of the same exceedance field used by `def`) | `spa_p1..spa_p3` (3 states: Localized / Moderate / Widespread); raw values in `spatial_coverage` and `hotspot_fraction` | 1981-01 → 2026-04 | ✓ |
 | `trn` (SPI-3 trend) | Slope of the monthly observed SPI-3 series over the last `--trend-months` (default 6) months ending at init | ERA5 SPI zarr | `trn_p1..trn_p3` (3 states: Deteriorating / Stable / Improving — REVERSED column order) | 1940-01 → 2026-01 | ✓ |
-| `tail` (worst-case ens-min SPI) | The 5th-percentile SPI-3 across SEAS5 members at the target lead — the "bad ensemble member" tail risk | SEAS5 SPI-3 icechunk | `tail_p1..tail_p4` (4 states: High / Moderate / Low / Nil — REVERSED column order) | 1981-01 → 2026-04 | **dropped in v2_notail** (was in v1 5-parent variant; removed because it was driving 84% of admin-months to Actionable_Risk) |
+| `tail` (worst-case ens-min SPI) | The 5th-percentile SPI-3 across SEAS5 members at the target lead — the "bad ensemble member" tail of the same exceedance distribution that `def` and `spa` summarise | SEAS5 SPI-3 icechunk; binned with reference to the same ERA5 RP threshold scale as `def`/`spa` | `tail_p1..tail_p4` (4 states: High / Moderate / Low / Nil — REVERSED column order); raw value in `ens_min_spi_peak` | 1981-01 → 2026-04 | **dropped in v2_notail** (was in v1 5-parent variant; removed because it was driving 84% of admin-months to Actionable_Risk) |
 
 All five parent columns are written to the per-month soft CSV
 (`drought_inputs_<init>_<season>.csv`) regardless of which BN flavour the
 Julia inference will consume — `tail_*` columns are simply ignored by
 `drought_bn_ibf_v1.jl` when it runs in 4-parent mode.
+
+### Empirical RP-exceedance is the backbone of `def` + `spa` + `tail`
+
+A common question: "Is there a return-period threshold exceedance step
+between SEAS5 and `era5_ecmwf_rp_icechunk` that surfaces as an evidence
+node?" — **yes, and it drives three of the five parent nodes**, not one.
+
+The shared lineage:
+
+```
+era5_ecmwf_rp_icechunk[spi_period=SPI3, return_period=5yr, fitted]
+       │   per-pixel SPI threshold on the ERA5 climatology grid
+       ▼
+SEAS5 SPI-3 forecast (member, lat, lon) at target-season lead
+       │   per-pixel boolean: is this member's SPI ≤ that pixel's RP threshold?
+       ▼
+deficit_lead = (fc_target ≤ rp_thresh)                      # (member, lat, lon)
+       │
+       ├──► p_def_l1 = deficit_lead.mean(dim="member")       # empirical exceedance prob, per pixel
+       │       │
+       │       ├──► zonal_mean(p_def_l1, admin1 mask)        ──► forecast_deficit_prob ──► def_p1..def_p5
+       │       └──► zonal_mean(p_def_l1 > 0.5, admin1 mask)  ──► spatial_coverage      ──► spa_p1..spa_p3 (driver A)
+       │
+       ├──► crosses_rp_any = deficit_lead.any(dim="member")  # any-member exceedance, per pixel
+       │       └──► zonal_mean(crosses_rp_any > 0.5)         ──► hotspot_fraction      ──► spa_p1..spa_p3 (driver B)
+       │
+       └──► ens_min_anylead = fc_target.min(dim="member")    # worst-member SPI tail, per pixel
+               └──► zonal_quantile(q=0.05, admin1 mask)      ──► ens_min_spi_peak      ──► tail_p1..tail_p4 (5-parent only)
+```
+
+Three different *summaries* of the same per-pixel exceedance field:
+
+| Summary | Captures | Surfaces in |
+|---|---|---|
+| Mean over members, mean over pixels | "How likely is a typical member to cross RP somewhere typical in the polygon" | `def` |
+| Fraction of pixels with majority-members crossing | "How widespread is the exceedance" | `spa` (`spatial_coverage`) |
+| Fraction of pixels with any-member crossing | "How big is the hotspot envelope" | `spa` (`hotspot_fraction`) |
+| 5th-percentile worst member | "How bad is the bad member" | `tail` (5-parent only) |
+
+The threshold-source string in every output CSV is
+`deficit_threshold_source = "era5_ecmwf_rp_icechunk:Nyr fitted"` (where N
+is `--rp-years`, default 5). v1 used a scalar `--deficit-spi=-1.0` instead
+(McKee moderate-drought) — that path is preserved for backwards
+compatibility but the **production v2 path is the per-pixel RP threshold**.
+
+So there is no separate "exceedance" node in the BN graph because the
+exceedance computation is already the *substrate* of three of the five
+parents — bringing it back as a fourth parent would double-count the same
+SEAS5-vs-RP signal three times. What the `def` / `spa` / `tail` split
+buys you is **independent summary statistics of that exceedance field**:
+location-mean, spatial-coverage, and worst-member tail, each entering the
+risk CPT through its own conditional dependency.
 
 ### Latent / output nodes
 
