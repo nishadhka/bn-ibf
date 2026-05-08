@@ -267,46 +267,47 @@ this with the operational GDO fAPAR (2012-01 → now) gives **continuous
 fAPAR-anomaly coverage from 2001-01 onwards**, with a 2012–2015 overlap
 window for cross-validation.
 
-### What needs to change in `cdi_data_prep.py`
+### What changed in `cdi_data_prep.py` (commit referenced below)
 
-A small extension to make the recompute path adaptive on fAPAR:
+The script now ships a year-aware fAPAR opener (`_open_fapar_for`) and a
+new CLI flag `--fapar-source {auto,gdo,modis,none}` (default `auto`).
+Routing logic:
+
+| target | `auto` mode | resulting `fapar_source` label in CSV |
+|---|---|---|
+| < 2001-01 | None — graceful degradation to SPI+SMA-only CDI | `none` |
+| 2001-01 — 2011-12 | GDO fAPAR-MODIS backfill (`gdo_fpar_modis_icechunk`) | `modis` |
+| 2012-01 — now | GDO fAPAR operational (`gdo_fpar_icechunk`) | `gdo` |
 
 ```python
-# In drought_ibf/cdi_data_prep.py
+# drought_ibf/cdi_data_prep.py — added near the existing prefix constants
+GDO_FPAR_PREFIX            = "e4drr-project/observations/gdo_fpar_icechunk"
+GDO_FPAR_MODIS_PREFIX      = "e4drr-project/observations/gdo_fpar_modis_icechunk"
+GDO_FPAR_OPERATIONAL_START = pd.Timestamp("2012-01-01")
+GDO_FPAR_MODIS_START       = pd.Timestamp("2001-01-01")
+GDO_FPAR_MODIS_END         = pd.Timestamp("2015-12-31")
 
-GDO_FPAR_PREFIX       = "e4drr-project/observations/gdo_fpar_icechunk"
-GDO_FPAR_MODIS_PREFIX = "e4drr-project/observations/gdo_fpar_modis_icechunk"  # new
-
-def open_fapar_for(target: pd.Timestamp) -> xr.Dataset:
-    """Return the right fAPAR icechunk for a given init date.
-
-    2001-01 → 2011-12: MODIS only
-    2012-01 → 2015-12: prefer GDO operational, fall back to MODIS
-    2016-01 → now    : GDO operational only
-    """
-    if target.year < 2012:
-        return open_icechunk_anon(GDO_FPAR_MODIS_PREFIX)
-    return open_icechunk_anon(GDO_FPAR_PREFIX)
+def _open_fapar_for(target, mode):
+    """Pick the fAPAR icechunk store appropriate for `target` and `mode`.
+    Returns (fapar_dataset_or_None, source_label)."""
+    # full implementation in cdi_data_prep.py
 ```
 
-Both stores expose the same `fapan` variable on the same EA grid (per the
-MODIS script's `EA_LAT_MIN/MAX/EA_LON_MIN/MAX` constants and the GDO
-script's matching subsetting), so the rest of `cdi_data_prep.py` (the
-regridder onto the CHIRPS grid + the `lt_m1` thresholding) is unchanged.
+When the helper returns `(None, "none")` (target predates 2001-01 or the
+user passed `--fapar-source none`), `_aggregate_recompute` builds an
+all-False fAPAR mask on the CHIRPS grid. That makes
+`calculate_cdi_grid()`'s `fapar_lt_m1` boolean uniformly False, so every
+Alert-class branch (which requires `fapar_lt_m1`) fails and the rule
+cascade naturally falls through to Warning / Watch / Recovery branches —
+exactly the graceful-degradation behaviour described in §4.
 
-The MODIS product's anomaly definition is consistent with the operational
-GDO MERIS+OLCI fAPAR-anomaly definition (`fapan` = "fAPAR anomaly", < -1 σ
-flagged as deficit), so the JRC rule cascade can be applied unchanged.
+Both stores (operational GDO + MODIS backfill) expose the same `fpanv`
+fAPAR-anomaly variable on the same EA grid, so the regridder onto the
+CHIRPS grid + the `lt_m1` thresholding is unchanged.
 
-### Alternative (no script change)
-
-If you don't want to wire the MODIS source into `cdi_data_prep.py` yet,
-you can still run the BN for 2005+ — the recompute path will simply
-return a **2-component CDI** (SPI + SMA, fAPAR missing) with maximum class
-6 (Warning) for any month before 2012-01. This degraded-but-still-valid
-CDI flows through the same likelihood matrix; the post-CDI posterior is
-just less aggressively pushed for those months. This is the "graceful
-degradation" path described in §4.
+The chosen source is recorded per-row in the output CSV's `fapar_source`
+column so the downstream BN run can audit which CDI lineage produced
+each post-CDI posterior.
 
 ---
 
@@ -376,6 +377,50 @@ From the 2026-05-01 rerun notes (`bn_ibf_rerun_2026-05-01.md`):
 
 Sequential cold ≈ **~16 h**; warm-Julia loop ≈ **~9 h**; Coiled / Lithops
 parallelised ≈ **~30-60 min** end-to-end.
+
+### Smallest set of changes to commission the 1981 → 2024 backfill
+
+The full 1981-01 → 2024-12 sweep is 528 (init, season) pairs. The smallest
+set of changes — building on the patches landed in this revision — is:
+
+1. **Loop driver** — `run_drought_bn_backfill.sh` (or `.py`) iterating the
+   528 (init, season) pairs:
+   - calls `drought_data_prep.py --init-month <YYYY-MM> --target-season <S>`
+     for each pair, writing into `bn_inputs_v2_backfill/`
+   - feeds CSVs to a **single warm Julia process** running
+     `drought_bn_ibf_v1.jl` (cuts the per-init cost from ~95 s of JIT
+     startup down to <1 s of inference per call)
+   - writes BN posteriors into `output_v2_notail_backfill/` for the BN-only
+     posterior and `output_v2_notail_cdi_backfill/` for the post-CDI posterior
+
+2. **CDI gating by year** — drive `cdi_data_prep.py` + `cdi_evidence_update.py`
+   only for inits where the relevant CDI source is available. With the
+   `--fapar-source=auto` patch landed in this revision, the gating
+   becomes:
+
+   | init range | CDI command |
+   |---|---|
+   | 1981-01 — 1994-12 | (none — pre-CDI posterior is the final output) |
+   | 1995-01 — 2000-12 | `cdi_data_prep.py --cdi-source recompute --fapar-source none` (Watch+Warning only, no fAPAR available) |
+   | 2001-01 — 2009-12 | `cdi_data_prep.py --cdi-source recompute --fapar-source auto` (auto resolves to MODIS) |
+   | 2010-01 — 2011-12 | `cdi_data_prep.py --cdi-source both --fapar-source auto` (MODIS recompute + EADW operational) |
+   | 2012-01 — 2024-12 | `cdi_data_prep.py --cdi-source both --fapar-source auto` (GDO recompute + EADW operational) |
+
+   The pre-2001 SPI+SMA-only branch is what was previously called the
+   "alternative — no script change" fallback in §6; with the
+   `--fapar-source none` flag it's now a first-class operating mode rather
+   than an accidental side effect of running the recompute path on a
+   month with no fAPAR.
+
+3. **Single-pass artifact generation** — after the 528-month sweep
+   completes, run `generate_drought_bn_parquet.py` and
+   `generate_drought_bn_dag_json.py` once over the full backfill output
+   dir to produce a single 528-row monthly parquet and 528 DAG JSONs.
+
+4. **Upload** via `upload_bn_artifacts.py` (the routine end-of-run helper
+   in the repo root). With `--skip-unchanged` it will only upload the new
+   480-odd objects (since the existing 16-month `output_v2_notail_cdi/`
+   subset is already in GCS unchanged).
 
 ### Output deliverables
 

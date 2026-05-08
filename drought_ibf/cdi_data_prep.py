@@ -81,7 +81,18 @@ S3_BUCKET            = "us-west-2.opendata.source.coop"
 S3_REGION            = "us-west-2"
 CHIRPS_SPI_PREFIX    = "e4drr-project/observations/chirps_spi_icechunk"
 GDO_SMA_PREFIX       = "e4drr-project/observations/gdo_sma_icechunk"
-GDO_FPAR_PREFIX      = "e4drr-project/observations/gdo_fpar_icechunk"
+GDO_FPAR_PREFIX       = "e4drr-project/observations/gdo_fpar_icechunk"        # GDO MERIS+OLCI operational, 2012-01–now
+GDO_FPAR_MODIS_PREFIX = "e4drr-project/observations/gdo_fpar_modis_icechunk"   # GDO fAPAR-MODIS backfill, 2001-01–2015-12
+                                                                               #   produced by ibf-thresholds-triggers/thresholds/hf-gdo/gdo_fpar_modis_icechunk.py
+
+# Year boundaries used by the auto-selection logic. The GDO operational
+# product (MERIS+OLCI) starts 2012-01; the MODIS backfill covers 2001-01
+# through 2015-12 (with 2012-2015 overlap). Both stores expose the same
+# fAPAR-anomaly variable on the same EA grid, so calculate_cdi() runs
+# unchanged regardless of which one supplies the field.
+GDO_FPAR_OPERATIONAL_START = pd.Timestamp("2012-01-01")
+GDO_FPAR_MODIS_START       = pd.Timestamp("2001-01-01")
+GDO_FPAR_MODIS_END         = pd.Timestamp("2015-12-31")
 EADW_CDI_PREFIX      = "e4drr-project/observations/icpac_cdi_dekadal_icechunk"
 
 # 14-class → 6-level lookup, shared by recompute and EADW paths.
@@ -377,26 +388,95 @@ def aggregate_per_boundary(
 # ─── main ────────────────────────────────────────────────────────────────────
 
 
+def _open_fapar_for(target: pd.Timestamp, mode: str
+                    ) -> tuple[xr.Dataset | None, str]:
+    """Pick the fAPAR icechunk store appropriate for `target` and `mode`.
+
+    Returns (fapar_dataset, source_label). When mode resolves to "none"
+    (target predates all fAPAR coverage, or the user forced --fapar-source
+    none), returns (None, "none") so the calling code can pass an
+    all-NaN/all-False fAPAR mask and let calculate_cdi() degrade
+    gracefully through the SMA-only / SPI-only branches of the rule
+    cascade.
+
+    Modes:
+      "auto"  : MODIS for inits before 2012-01; GDO operational from
+                2012-01 onwards. If target < 2001-01 → returns ("none").
+      "gdo"   : force GDO operational. Errors out if target < 2012-01.
+      "modis" : force GDO-MODIS backfill. Errors out if target outside
+                2001-01..2015-12.
+      "none"  : skip fAPAR entirely; CDI rule cascade falls through to
+                SMA-only / SPI-only branches.
+    """
+    if mode == "none":
+        print("[cdi-prep] fAPAR disabled by --fapar-source=none "
+              "(rule cascade will degrade to SMA-only / SPI-only branches)",
+              flush=True)
+        return (None, "none")
+
+    if mode == "gdo":
+        if target < GDO_FPAR_OPERATIONAL_START:
+            raise SystemExit(
+                f"[cdi-prep] --fapar-source=gdo requires target >= "
+                f"{GDO_FPAR_OPERATIONAL_START.date()}, got {target.date()}. "
+                f"Use --fapar-source=auto or modis for older targets, or "
+                f"--fapar-source=none to skip fAPAR.")
+        print("[cdi-prep] opening GDO fAPAR (operational MERIS+OLCI) icechunk ...",
+              flush=True)
+        return (open_icechunk_anon(GDO_FPAR_PREFIX), "gdo")
+
+    if mode == "modis":
+        if not (GDO_FPAR_MODIS_START <= target <= GDO_FPAR_MODIS_END):
+            raise SystemExit(
+                f"[cdi-prep] --fapar-source=modis requires target in "
+                f"[{GDO_FPAR_MODIS_START.date()}, {GDO_FPAR_MODIS_END.date()}], "
+                f"got {target.date()}. Use --fapar-source=auto or gdo for "
+                f"out-of-range targets, or --fapar-source=none to skip fAPAR.")
+        print("[cdi-prep] opening GDO fAPAR-MODIS backfill icechunk ...",
+              flush=True)
+        return (open_icechunk_anon(GDO_FPAR_MODIS_PREFIX), "modis")
+
+    # mode == "auto"
+    if target >= GDO_FPAR_OPERATIONAL_START:
+        print("[cdi-prep] auto: target >= 2012-01 → using GDO fAPAR (operational)",
+              flush=True)
+        return (open_icechunk_anon(GDO_FPAR_PREFIX), "gdo")
+    if target >= GDO_FPAR_MODIS_START:
+        print("[cdi-prep] auto: 2001-01 <= target < 2012-01 → using GDO fAPAR-MODIS backfill",
+              flush=True)
+        return (open_icechunk_anon(GDO_FPAR_MODIS_PREFIX), "modis")
+    print(f"[cdi-prep] auto: target {target.date()} predates all fAPAR coverage "
+          f"(MODIS starts {GDO_FPAR_MODIS_START.date()}); falling back to "
+          f"SPI+SMA-only CDI (max class 6, Warning level)", flush=True)
+    return (None, "none")
+
+
 def _aggregate_recompute(
     D: pd.Timestamp, adm1: gpd.GeoDataFrame, spi_long: str,
+    fapar_source: str = "auto",
 ) -> tuple[dict, dict]:
-    """Run the original recompute path and return per-boundary stats + provenance."""
+    """Run the original recompute path and return per-boundary stats + provenance.
+
+    `fapar_source` selects the fAPAR icechunk store: see _open_fapar_for().
+    """
     print("[cdi-prep] opening CHIRPS SPI icechunk ...", flush=True)
     spi_ds = open_icechunk_anon(CHIRPS_SPI_PREFIX)
     print("[cdi-prep] opening GDO SMA icechunk ...", flush=True)
     sma_ds = open_icechunk_anon(GDO_SMA_PREFIX)
-    print("[cdi-prep] opening GDO fAPAR icechunk ...", flush=True)
-    fp_ds  = open_icechunk_anon(GDO_FPAR_PREFIX)
+    fp_ds, fapar_label = _open_fapar_for(D, fapar_source)
 
     spi_idx      = latest_le_idx(spi_ds.time.values, D)
     spi_prev_idx = previous_month_idx(spi_ds.time.values, spi_idx)
     sma_idx      = latest_le_idx(sma_ds.time.values, D)
-    fp_idx       = latest_le_idx(fp_ds.time.values, D)
     spi_t      = pd.Timestamp(spi_ds.time.values[spi_idx])
     sma_t      = pd.Timestamp(sma_ds.time.values[sma_idx])
-    fp_t       = pd.Timestamp(fp_ds.time.values[fp_idx])
+    fp_t: pd.Timestamp | None = None
+    if fp_ds is not None:
+        fp_idx = latest_le_idx(fp_ds.time.values, D)
+        fp_t   = pd.Timestamp(fp_ds.time.values[fp_idx])
     print(f"[cdi-prep] recompute time slices: SPI={spi_t.date()} "
-          f"SMA={sma_t.date()} fAPAR={fp_t.date()}", flush=True)
+          f"SMA={sma_t.date()} fAPAR={fp_t.date() if fp_t else 'N/A'} "
+          f"(fapar_source={fapar_label})", flush=True)
 
     spi3      = spi_ds.spi3.isel(time=spi_idx).load()
     spi1      = spi_ds.spi1.isel(time=spi_idx).load()
@@ -404,13 +484,28 @@ def _aggregate_recompute(
     spi3_prev = spi_ds.spi3.isel(time=spi_prev_idx).load()
     spi1_prev = spi_ds.spi1.isel(time=spi_prev_idx).load()
     sma       = sma_ds.smang.isel(time=sma_idx).load()
-    fapar     = fp_ds.fpanv.isel(time=fp_idx).load()
+    if fp_ds is not None:
+        fapar = fp_ds.fpanv.isel(time=fp_idx).load()
+    else:
+        # No fAPAR for this target. Build an all-False mask on the CHIRPS
+        # grid so calculate_cdi_grid()'s `fapar_lt_m1` is uniformly False
+        # — every Alert / Partial-recovery rule branch (which requires
+        # fapar_lt_m1) will fail and the cascade naturally degrades to
+        # the Warning / Watch / Full-recovery branches that depend only
+        # on SMA + SPI. The output `cdi_class` will therefore be ≤ 6
+        # (Warning) or in {13, 14} (Full_recovery) for the affected
+        # months — exactly the documented graceful-degradation behaviour.
+        fapar = xr.full_like(spi3, fill_value=0.0, dtype="float32")
+        fapar = fapar.assign_attrs(units="anomaly_proxy",
+                                    note="fAPAR unavailable; calculate_cdi sees "
+                                         "fapar_lt_m1 = False everywhere")
 
     print("[cdi-prep] regridding SMA + fAPAR to CHIRPS grid ...", flush=True)
     sma_rg   = regrid_to(sma,   spi3.lat, spi3.lon)
-    fapar_rg = regrid_to(fapar, spi3.lat, spi3.lon)
+    fapar_rg = (fapar if fp_ds is None else regrid_to(fapar, spi3.lat, spi3.lon))
 
-    print("[cdi-prep] computing CDI grid (recompute) ...", flush=True)
+    print(f"[cdi-prep] computing CDI grid (recompute, fapar_source={fapar_label}) ...",
+          flush=True)
     cdi_class, cdi_level_idx = calculate_cdi_grid(
         spi9_12.values, spi3.values, spi1.values,
         spi3_prev.values, spi1_prev.values,
@@ -428,7 +523,8 @@ def _aggregate_recompute(
         dict(max_class=max_class, max_level=max_level,
              modal_class=modal_class, level_frac=level_frac),
         dict(spi_time=str(spi_t.date()), sma_time=str(sma_t.date()),
-             fapar_time=str(fp_t.date())),
+             fapar_time=(str(fp_t.date()) if fp_t else "none"),
+             fapar_source=fapar_label),
     )
 
 
@@ -463,6 +559,13 @@ def main() -> None:
                     choices=["recompute", "eadw", "both"],
                     help="Source of CDI: recompute path (default), pre-computed "
                          "ICPAC EADW, or both side-by-side with agreement flag")
+    ap.add_argument("--fapar-source", default="auto",
+                    choices=["auto", "gdo", "modis", "none"],
+                    help="fAPAR icechunk to use within the recompute path: "
+                         "'auto' picks GDO operational (>=2012-01) or GDO-MODIS "
+                         "backfill (2001-01..2011-12), 'gdo' / 'modis' force a "
+                         "single source, 'none' skips fAPAR entirely (cdi rule "
+                         "cascade degrades to SPI+SMA, max class = Warning).")
     args = ap.parse_args()
 
     D = pd.Timestamp(args.date).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -496,7 +599,8 @@ def main() -> None:
         }
 
     if args.cdi_source == "recompute":
-        stats, prov = _aggregate_recompute(D, adm1, args.spi_long)
+        stats, prov = _aggregate_recompute(D, adm1, args.spi_long,
+                                            fapar_source=args.fapar_source)
         df = pd.concat([base, pd.DataFrame(_columns(stats))], axis=1)
         df["cdi_source"] = "recomputed"
         for k, v in prov.items():
@@ -508,7 +612,8 @@ def main() -> None:
         for k, v in prov.items():
             df[k] = v
     else:  # both
-        rc_stats, rc_prov = _aggregate_recompute(D, adm1, args.spi_long)
+        rc_stats, rc_prov = _aggregate_recompute(D, adm1, args.spi_long,
+                                                  fapar_source=args.fapar_source)
         ew_stats, ew_prov = _aggregate_eadw(D, adm1)
         df = pd.concat([
             base,
