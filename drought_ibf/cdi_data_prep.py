@@ -485,7 +485,15 @@ def _aggregate_recompute(
     spi1_prev = spi_ds.spi1.isel(time=spi_prev_idx).load()
     sma       = sma_ds.smang.isel(time=sma_idx).load()
     if fp_ds is not None:
-        fapar = fp_ds.fpanv.isel(time=fp_idx).load()
+        # GDO operational store names the variable 'fpanv'; the GDO-MODIS
+        # backfill store names it 'fapan' (per the upstream Copernicus GDO
+        # MODIS NetCDFs). Auto-detect.
+        fapar_var = next((v for v in ("fpanv", "fapan") if v in fp_ds.data_vars), None)
+        if fapar_var is None:
+            raise SystemExit(
+                f"[cdi-prep] no fAPAR variable in {fapar_label} store; "
+                f"expected 'fpanv' (GDO) or 'fapan' (MODIS), got {list(fp_ds.data_vars)}")
+        fapar = fp_ds[fapar_var].isel(time=fp_idx).load()
     else:
         # No fAPAR for this target. Build an all-False mask on the CHIRPS
         # grid so calculate_cdi_grid()'s `fapar_lt_m1` is uniformly False
