@@ -225,23 +225,44 @@ new:   prep+cdi-fold (Python) → bn (Julia warm)
 
 ---
 
-## 7. RxInfer 5-parent ceiling — be aware
+## 7. RxInfer parent-count: not a hard ceiling, just a performance cliff
 
-`DiscreteTransition` in RxInfer tops out at 5 parents in the tensor form
-(see `flood_ibf/README.md` §3 "Known limitations" — re-enabling
-`forecast_agreement` requires restructuring once that ceiling is hit).
-Adding CDI takes the drought BN from 4 to 5 parents (or from 5 to 6 if
-agreement is kept). Practical implications:
+Source-verified against ReactiveMP 5.6.6 (the version pinned in
+`Manifest.toml`). The widely-cited "5-parent ceiling" is imprecise:
 
-- **Drop or fold `forecast_agreement`** — currently noted in
-  `evidence_nodes.md` as deprecated for v2; this is a good moment to
-  formalise the drop.
-- **Or factorise** — e.g. introduce an intermediate
-  `current_drought_state` node that absorbs both `current_spi3` and
-  `cdi`, with risk_level having 4 parents again. Cleaner long-term but
-  costs another round of CPT design for the intermediate node.
+- **Predefined `@tullio` fast rules** in
+  `ReactiveMP/src/rules/discrete_transition/predefined/belief_propagation.jl`
+  exist for **1, 2, 3, and 4 conditioning parents** (CPT tensor up to
+  5-D). These are the optimised inference path.
+- **Generic structured-message rule** in
+  `ReactiveMP/src/rules/discrete_transition/categoricals.jl:169-203`
+  handles **any number of parents** via dynamic `sum_out_dimensions` /
+  `multiply_dimensions!` calls. Slower per inference but no parent-count
+  limit.
 
-For first cut, dropping `forecast_agreement` is the cheap path.
+So adding CDI (4 → 5 parents) leaves the fast path and lands on the
+generic rule: estimated ~2-4× per-init slowdown, to be benchmarked.
+Adding CDI + METAR (4 → 6 parents) stays on the same generic path,
+with a further ~5× growth in the CPT-build enumeration cost (one-shot,
+not per-init). Neither is a feasibility blocker for the warm Julia
+loop's ~1 s/init baseline — both are still well under 10 s/init worst
+case for the 528-init backfill.
+
+Practical implications:
+
+- **`forecast_agreement` can stay deprecated** for v2 without performance
+  pressure — there's no slot to free up, both 5- and 6-parent paths use
+  the same generic rule anyway.
+- **Factorisation is no longer load-bearing** — the proposal to absorb
+  `current_spi3` and `cdi` into an intermediate `current_drought_state`
+  node (to drop back to 4 parents) was driven by the 5-parent fast-path
+  assumption. With the actual ceiling clarified, you can keep the
+  parents explicit if domain semantics call for it.
+- **What does matter**: benchmark the generic rule's per-init cost on
+  this Julia 1.12 + RxInfer 4.7.3 stack before committing. If it
+  exceeds ~5 s/init in the warm loop, the bulk-run alternative
+  (matmul-style direct contraction, as in `flood_bn_ibf_v1.jl`'s
+  `infer_soft_matmul()`) is the established fallback.
 
 ---
 

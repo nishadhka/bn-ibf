@@ -180,9 +180,15 @@ for the worst member).
 (~115 770 inferences over 10 days), a direct tensor contraction
 `infer_soft_matmul()` is used, verified against RxInfer to
 `|Δ| < 1.5 × 10⁻⁹`. Passing `--legacy-inference` routes back through the
-old matmul-with-parent-index-flattening path, which is also the only
-option when `include_agreement = true` (RxInfer's exact
-`DiscreteTransition` rules top out at 5 conditioning parents).
+old matmul-with-parent-index-flattening path. RxInfer's **optimised**
+`@tullio`-based `DiscreteTransition` rules in `ReactiveMP/.../predefined/
+belief_propagation.jl` are predefined for up to **4 conditioning parents**
+(a 5-D CPT tensor); beyond that, RxInfer falls through to the generic
+structured-message rule in `categoricals.jl`, which supports arbitrary
+parent counts at a per-inference performance cost. `include_agreement =
+true` (6 conditioning parents) therefore works but on the generic path,
+which is why `infer_soft_matmul()` / `--legacy-inference` is the
+preferred bulk-run alternative.
 
 **CRMA cost-loss trigger**: the risk posterior is mapped to a 4-state
 output (Monitor / Evaluate / Assess / Actionable_Risk) by thresholds
@@ -376,7 +382,7 @@ system would have reported as benign.
 
 1. **Short forecast lead**: init=D 00Z means each day's forecast only covers D→D+7. Multi-init fusion (pooling forecasts from D-3, D-2, D-1, D) could extend effective lead time.
 2. **Scale mismatch**: ECMWF 0.25° (~28 km) averages over entire urban areas. CMORPH thresholds at 0.073° are point-scale. Convective rainfall is unpredictable at this scale — the ensemble spread captures it but the mean undersells; per-member storylines partially mitigate but do not eliminate the scale gap.
-3. **Single-model forecasts**: only ECMWF available. Adding NOAA GEFS would activate the `forecast_agreement` node (currently retired) and provide multi-model robustness; on the primary RxInfer path, re-enabling agreement requires restructuring the risk CPT as a 6-parent tensor (library top-out is 5).
+3. **Single-model forecasts**: only ECMWF available. Adding NOAA GEFS would activate the `forecast_agreement` node (currently retired) and provide multi-model robustness; re-enabling agreement takes the BN to a 6-parent CPT, which is beyond ReactiveMP's predefined-rule range (1-4 conditioning parents). It still runs via the generic structured-message rule with a per-inference slowdown, so the choice is performance vs. expressiveness, not feasibility — `infer_soft_matmul()` is the bulk-run workaround.
 4. **Fixed expert CPTs**: the risk CPT encodes domain knowledge but has no empirical calibration. A future Bayesian-learning upgrade (Dirichlet priors on CPT columns, fed by historical flood events from EMDAT / FloodList / ICPAC incident DB) would refine these.
 5. **Hazard likelihood only**: the `risk_level` node is a hazard-likelihood indicator, not a full IPCC AR6 WGII risk (= hazard × exposure × vulnerability). Joining population (WorldPop), vulnerability (INFORM), and critical infrastructure layers is a separate roadmap item.
 6. **Independent boundaries**: no spatial smoothing between neighbors — a hotspot in Bungoma does not elevate the prior for adjacent Busia. Hierarchical/MRF extensions are possible in RxInfer.

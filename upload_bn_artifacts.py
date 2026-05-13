@@ -1,4 +1,4 @@
-#!/usr/bin/env -S uv run --with google-cloud-storage --with pandas python3
+#!/usr/bin/env -S uv run --with google-cloud-storage --with pandas --with python-dotenv python3
 """
 upload_bn_artifacts.py
 Routine GCS upload of the BN IBF artifacts consumed by the crma-api Cloud
@@ -53,8 +53,11 @@ from pathlib import Path
 
 # google-cloud-storage is the only non-stdlib dep
 from google.cloud import storage  # type: ignore
+from dotenv import load_dotenv
 
 REPO_ROOT = Path(__file__).resolve().parent
+load_dotenv(REPO_ROOT / ".env")
+
 DEFAULT_BUCKET = "crma-mdx-store"
 
 # ---------------------------------------------------------------------------
@@ -172,6 +175,14 @@ def main() -> int:
     ap.add_argument("--skip-unchanged", action="store_true",
                     help="Skip files whose md5 already matches the GCS object. "
                          "Without this flag, every file is overwritten.")
+    ap.add_argument("--drought-dag-dir", default=None, type=Path,
+                    help="Override the drought DAG-JSON source directory. "
+                         "Default is drought_ibf/output_v2_notail_cdi/bn-dag. "
+                         "Pass output_v2_notail_cdi_backfill/bn-dag to target "
+                         "the 1981-2024 backfill output.")
+    ap.add_argument("--flood-dag-dir", default=None, type=Path,
+                    help="Override the flood DAG-JSON source directory. "
+                         "Default is flood_ibf/output/bn-dag.")
     args = ap.parse_args()
 
     if args.flood_only and args.drought_only:
@@ -205,7 +216,9 @@ def main() -> int:
             is_drought = glob_pat.startswith("drought-")
             if args.flood_only   and is_drought:     continue
             if args.drought_only and not is_drought: continue
-            dag_targets.extend(collect_dag_pairs(src_dir, glob_pat, dst_prefix))
+            override = args.drought_dag_dir if is_drought else args.flood_dag_dir
+            effective_dir = (override.resolve() if override else src_dir)
+            dag_targets.extend(collect_dag_pairs(effective_dir, glob_pat, dst_prefix))
 
     # ── Plan ──────────────────────────────────────────────────────────────
 
