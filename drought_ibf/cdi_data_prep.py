@@ -90,7 +90,7 @@ GDO_FPAR_MODIS_PREFIX = "e4drr-project/observations/gdo_fpar_modis_icechunk"   #
 # through 2015-12 (with 2012-2015 overlap). Both stores expose the same
 # fAPAR-anomaly variable on the same EA grid, so calculate_cdi() runs
 # unchanged regardless of which one supplies the field.
-GDO_FPAR_OPERATIONAL_START = pd.Timestamp("2012-01-01")
+GDO_FPAR_OPERATIONAL_START = pd.Timestamp("2012-02-01")  # store's first dekad is 2012-01-21
 GDO_FPAR_MODIS_START       = pd.Timestamp("2001-01-01")
 GDO_FPAR_MODIS_END         = pd.Timestamp("2015-12-31")
 EADW_CDI_PREFIX      = "e4drr-project/observations/icpac_cdi_dekadal_icechunk"
@@ -438,11 +438,11 @@ def _open_fapar_for(target: pd.Timestamp, mode: str
 
     # mode == "auto"
     if target >= GDO_FPAR_OPERATIONAL_START:
-        print("[cdi-prep] auto: target >= 2012-01 → using GDO fAPAR (operational)",
+        print(f"[cdi-prep] auto: target >= {GDO_FPAR_OPERATIONAL_START.date()} → using GDO fAPAR (operational)",
               flush=True)
         return (open_icechunk_anon(GDO_FPAR_PREFIX), "gdo")
     if target >= GDO_FPAR_MODIS_START:
-        print("[cdi-prep] auto: 2001-01 <= target < 2012-01 → using GDO fAPAR-MODIS backfill",
+        print(f"[cdi-prep] auto: {GDO_FPAR_MODIS_START.date()} <= target < {GDO_FPAR_OPERATIONAL_START.date()} → using GDO fAPAR-MODIS backfill",
               flush=True)
         return (open_icechunk_anon(GDO_FPAR_MODIS_PREFIX), "modis")
     print(f"[cdi-prep] auto: target {target.date()} predates all fAPAR coverage "
