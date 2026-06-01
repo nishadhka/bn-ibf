@@ -143,14 +143,26 @@ def ecmwf_window_accums(ecmwf: xr.Dataset, init_date: pd.Timestamp) -> dict[str,
     return out
 
 
-def load_cmorph_thresholds(path: str, rp_year: int) -> dict[str, xr.DataArray]:
-    ds = xr.open_dataset(path)
+def _select_cmorph_rp(ds: xr.Dataset, rp_year: int) -> dict[str, xr.DataArray]:
     rp = ds.return_period_precip.sel(return_period=rp_year)
     if float(rp.lat[0]) > float(rp.lat[-1]):
         rp = rp.isel(lat=slice(None, None, -1))
     if float(rp.lon[0]) > float(rp.lon[-1]):
         rp = rp.isel(lon=slice(None, None, -1))
     return {dur: rp.sel(duration=dur).drop_vars("duration") for dur in DURATIONS}
+
+
+def load_cmorph_thresholds(path: str, rp_year: int) -> dict[str, xr.DataArray]:
+    """Pixel-wise RP thresholds from a local CMORPH return-period NetCDF."""
+    return _select_cmorph_rp(xr.open_dataset(path), rp_year)
+
+
+def load_cmorph_thresholds_icechunk(prefix: str, rp_year: int) -> dict[str, xr.DataArray]:
+    """Pixel-wise RP thresholds from the source.coop CMORPH RP icechunk store
+    (observations/cmorph_rp_icechunk). Mirrors the drought prep's
+    era5_ecmwf_rp_icechunk path; `return_period_precip` has dims
+    (duration, return_period, lat, lon)."""
+    return _select_cmorph_rp(open_icechunk(prefix), rp_year)
 
 
 def regrid_to(da_src: xr.DataArray, lat_target: xr.DataArray,
@@ -427,7 +439,17 @@ def main() -> None:
     ap.add_argument("--rp-years", type=int, default=2)
     ap.add_argument("--out", required=True)
     ap.add_argument("--adm1", default="icpac_adm1v3.geojson")
-    ap.add_argument("--cmorph-rp", default="cmorph_ea_return_periods.nc")
+    ap.add_argument("--cmorph-rp", default="cmorph_ea_return_periods.nc",
+                    help="Local CMORPH return-period NetCDF (used only when "
+                         "--cmorph-source netcdf).")
+    ap.add_argument("--cmorph-source", choices=["icechunk", "netcdf"],
+                    default="icechunk",
+                    help="Where to read CMORPH RP thresholds from. Default "
+                         "'icechunk' reads observations/cmorph_rp_icechunk on "
+                         "source.coop (no local .nc needed).")
+    ap.add_argument("--cmorph-rp-prefix",
+                    default="observations/cmorph_rp_icechunk",
+                    help="icechunk store prefix for CMORPH RP thresholds.")
     ap.add_argument("--trend-band", type=float, default=2.0)
     ap.add_argument("--member-sidecar", default=None,
                     help="Optional per-member sidecar CSV path (long format)")
@@ -487,7 +509,12 @@ def main() -> None:
         accums[k] = accums[k].load()
     print(f"[prep] ECMWF accums loaded for {list(accums)}")
 
-    thresh = load_cmorph_thresholds(args.cmorph_rp, args.rp_years)
+    if args.cmorph_source == "icechunk":
+        print(f"[prep] CMORPH RP from icechunk: {args.cmorph_rp_prefix}")
+        thresh = load_cmorph_thresholds_icechunk(args.cmorph_rp_prefix, args.rp_years)
+    else:
+        print(f"[prep] CMORPH RP from NetCDF: {args.cmorph_rp}")
+        thresh = load_cmorph_thresholds(args.cmorph_rp, args.rp_years)
     ref = accums["24hr"].isel(member=0)
     thresh_ec = {dur: regrid_to(thresh[dur], ref.lat, ref.lon) for dur in DURATIONS}
 
