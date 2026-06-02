@@ -59,7 +59,7 @@ def make_daily(df: pd.DataFrame) -> pd.DataFrame:
                 "n_monitor": int(counts.get("Monitor", 0)),
                 "n_evaluate": int(counts.get("Evaluate", 0)),
                 "n_assess": int(counts.get("Assess", 0)),
-                "n_actionable": int(counts.get("Actionable_Risk", 0)),
+                "n_actionable_risk": int(counts.get("Actionable_Risk", 0)),
             }
         )
     return pd.DataFrame(rows).sort_values(["year", "month", "day"]).reset_index(drop=True)
