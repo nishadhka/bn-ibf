@@ -190,6 +190,12 @@ def imerg_daily_totals(imerg: xr.Dataset, date_utc: pd.Timestamp) -> xr.DataArra
     start = pd.Timestamp(date_utc) - pd.Timedelta(days=7)
     end = pd.Timestamp(date_utc) - pd.Timedelta(seconds=1)
     hh = imerg.precipitation.sel(time=slice(start, end))  # mm/hr
+    # IMERG encodes missing retrievals as the fill value -9999.9 (not decoded to
+    # NaN by the store). Mask any non-physical negative before accumulating, or
+    # those fills sum into huge negative antecedent totals (recent operational
+    # dates are clean; historical weeks have missing swaths). skipna sums leave
+    # fully-missing days at 0.
+    hh = hh.where(hh >= 0.0)
     mm = hh * 0.5  # half-hour → mm
     daily = mm.resample(time="1D").sum()
     return daily.astype("float32")
