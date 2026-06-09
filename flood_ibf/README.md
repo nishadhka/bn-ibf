@@ -231,6 +231,15 @@ being robust to single outlier pixels.
 ./plot_bn_dag_per_day.py --boundary Nairobi --start 2026-03-01 --end 2026-03-10
 ```
 
+### Historical-event hindcasts (11 GHACOF73 events)
+Replay the same 15-day routine over the 11 historical flood events
+(2019–2024) using the WeatherBench2 archived ECMWF IFS-ENS forecast in place
+of the recent-only operational store. See `flood_events_run_notes.md`.
+```bash
+./run_flood_event.sh ken_2024_04        # one event → output/events/ken_2024_04/
+./run_all_flood_events.sh               # all 11 (events listed in flood_events.yaml)
+```
+
 ### Single day, single boundary diagnostic
 ```bash
 ./flood_data_prep.py --date 2026-03-06 --out bn_inputs/flood_inputs_2026-03-06.csv

@@ -1,0 +1,86 @@
+# 11 historical East-Africa flood events (GHACOF73 side event)
+# Source: github.com/icpac-igad/DevOps-hazard-modeling#flood-events
+#
+# Each event is replayed as a 15-day BN-IBF window using the WeatherBench2
+# archived ECMWF IFS-ENS forecast (--forecast-source ifs_ens_wb2) for the
+# forecast nodes and IMERG for the antecedent nodes. The run window is
+# derived as [peak_date - 5, peak_date + 9] (15 days), matching the
+# operational Mar-2026 layout where the event sat at ~day 6 of 15.
+#
+# peak_date is best-known (month-level from the source + known event onset);
+# refine against EM-DAT / DesInventar and the 9-day post-event tail absorbs
+# any slippage. window_pre / window_post override the default 5/9 if a given
+# event needs a different framing.
+
+defaults:
+  window_pre: 5      # days before peak (inclusive start = peak - window_pre)
+  window_post: 9     # days after peak  (inclusive end   = peak + window_post)
+  rp_years: 2
+  cost_loss_ratio: 0.20
+
+events:
+  - key: bdi_2024_04
+    country: Burundi
+    location: Bujumbura / Gatumba (Rusizi plain)
+    emdat: 2024-0232-BDI
+    peak_date: 2024-04-15
+
+  - key: dji_2019_11
+    country: Djibouti
+    location: Djibouti City
+    emdat: 2019-0579-DJI
+    peak_date: 2019-11-21
+
+  - key: eri_2019_08
+    country: Eritrea
+    location: Highlands
+    emdat: 2019-IBF03-ERI
+    peak_date: 2019-08-15
+
+  - key: eth_2021_05
+    country: Ethiopia
+    location: Addis Ababa / Akaki River
+    emdat: 2021-0343-ETH
+    peak_date: 2021-05-15
+
+  - key: ken_2024_04
+    country: Kenya
+    location: Nairobi
+    emdat: 2024-0247-KEN
+    peak_date: 2024-04-24
+
+  - key: rwa_2023_05
+    country: Rwanda
+    location: Western / Northern provinces (nationwide)
+    emdat: 2023-0267-RWA
+    peak_date: 2023-05-02
+
+  - key: sdn_2019_08
+    country: Sudan
+    location: Khartoum (Blue/White Nile)
+    emdat: 2019-0392-SDN
+    peak_date: 2019-08-25
+
+  - key: som_2023_09
+    country: Somalia
+    location: South region (Shabelle / Juba)
+    emdat: 2023-0741-SOM
+    peak_date: 2023-09-25
+
+  - key: ssd_2019_10
+    country: South Sudan
+    location: Upper Nile
+    emdat: 2019-0486-SSD
+    peak_date: 2019-10-15
+
+  - key: tza_2024_04
+    country: Tanzania
+    location: Dar es Salaam
+    emdat: 2024-0203-TZA
+    peak_date: 2024-04-15
+
+  - key: uga_2019_05
+    country: Uganda
+    location: nationwide
+    emdat: 2019-0254-UGA
+    peak_date: 2019-05-15

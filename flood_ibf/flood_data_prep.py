@@ -1,4 +1,4 @@
-#!/usr/bin/env -S uv run --with icechunk --with xarray --with "zarr>=3" --with numpy --with pandas --with geopandas --with regionmask --with netcdf4 --with pyarrow --with scipy --with fsspec --with s3fs
+#!/usr/bin/env -S uv run --with icechunk --with xarray --with "zarr>=3" --with numpy --with pandas --with geopandas --with regionmask --with netcdf4 --with pyarrow --with scipy --with fsspec --with s3fs --with gcsfs
 """
 Flood BN IBF v1 — per-day admin-1 input generator.
 
@@ -77,6 +77,55 @@ def open_ecmwf_store(pencil: bool) -> xr.Dataset:
         fs.get_mapper("e4drr-project/forecasts/ecmwf_ea_tp_pencil_zarr"),
         consolidated=False, decode_timedelta=True,
     )
+
+
+# East-Africa bbox (lat_s, lat_n, lon_w, lon_e) — a touch wider than the
+# icpac_adm1v3 extent (21.84-51.42°E, -11.75-23.15°N) so no boundary pixel
+# is clipped when we subset the global WeatherBench2 grid.
+EA_BBOX = (-12.0, 24.0, 21.0, 52.0)
+
+WB2_IFS_ENS_STORE = "gs://weatherbench2/datasets/ifs_ens/2016-2024-1440x721.zarr"
+
+
+def open_ifs_ens_wb2(store: str = WB2_IFS_ENS_STORE,
+                     bbox: tuple[float, float, float, float] = EA_BBOX) -> xr.Dataset:
+    """Open the WeatherBench2 ECMWF IFS-ENS archive (50-member, 0.25°,
+    2016-2024, 15-day 6-hourly leads) and normalize it to the same
+    interface the icechunk ECMWF store exposes, so the rest of the pipeline
+    (ecmwf_window_accums, exceedance/tail aggregation) is unchanged.
+
+    WeatherBench2 schema:  total_precipitation (metres, cumulative-since-init)
+      dims = (time=init, number=member, prediction_timedelta=lead, latitude, longitude)
+    Target schema:         tp  with dims (init_date, member, lead_time, lat, lon),
+      lead_time as timedelta64.  Units stay metres (×1000→mm downstream).
+    """
+    import gcsfs
+    # token="anon" forces anonymous access to the public weatherbench2 bucket;
+    # without it gcsfs falls back to ambient ADC, which may lack permission.
+    fs = gcsfs.GCSFileSystem(token="anon")
+    ds = xr.open_zarr(
+        fs.get_mapper(store),
+        consolidated=True, decode_timedelta=True,
+    )
+    lat_s, lat_n, lon_w, lon_e = bbox
+    # Orientation-agnostic bbox subset (WB2 lat may be ascending or
+    # descending; lon is 0-360 ascending and EA is all positive).
+    lat = ds.latitude.values
+    lon = ds.longitude.values
+    lat_slice = slice(lat_s, lat_n) if lat[0] < lat[-1] else slice(lat_n, lat_s)
+    lon_slice = slice(lon_w, lon_e) if lon[0] < lon[-1] else slice(lon_e, lon_w)
+    ds = ds.sel(latitude=lat_slice, longitude=lon_slice)
+    tp = ds.total_precipitation.rename({
+        "time": "init_date", "number": "member",
+        "prediction_timedelta": "lead_time",
+        "latitude": "lat", "longitude": "lon",
+    })
+    # Ensure lead_time is timedelta64 (decode_timedelta usually handles the
+    # 'hours' units; coerce if it arrives as a plain integer hour index).
+    if not np.issubdtype(tp.lead_time.dtype, np.timedelta64):
+        tp = tp.assign_coords(
+            lead_time=tp.lead_time.astype("int64") * np.timedelta64(1, "h"))
+    return tp.to_dataset(name="tp")
 
 
 # Soft-evidence binning: mirrors the Julia categorize_* cutoffs in
@@ -459,6 +508,16 @@ def main() -> None:
     ap.add_argument("--pencil", action="store_true",
                     help="Read ECMWF from the pencil-chunked zarr mirror "
                          "(forecasts/ecmwf_ea_tp_pencil_zarr) instead of the icechunk store")
+    ap.add_argument("--forecast-source",
+                    choices=["ecmwf_icechunk", "ifs_ens_wb2"],
+                    default="ecmwf_icechunk",
+                    help="Forecast precip store. Default 'ecmwf_icechunk' is the "
+                         "operational source.coop ECMWF ENS. 'ifs_ens_wb2' reads "
+                         "the WeatherBench2 archived ECMWF IFS-ENS (50-member, "
+                         "0.25°, 2016-2024) for historical-event hindcasts.")
+    ap.add_argument("--forecast-init-hour", type=int, default=0,
+                    help="Forecast init hour (UTC) selected from the store, e.g. "
+                         "0 for the 00Z init (default). WB2 IFS-ENS has 00Z/12Z.")
     ap.add_argument("--member-evidence-sidecar", default=None,
                     help="Enriched per-member sidecar CSV with full 5-parent evidence "
                          "for storyline BN runs (one row per boundary × member)")
@@ -497,14 +556,21 @@ def main() -> None:
     trend_cls = np.array([classify_trend(s, args.trend_band) for s in slopes])
 
     # ---------------- ECMWF exceedance ----------------
-    print(f"[prep] opening ECMWF {'pencil zarr' if args.pencil else 'icechunk'}...")
-    ecmwf = open_ecmwf_store(args.pencil)
+    if args.forecast_source == "ifs_ens_wb2":
+        print("[prep] opening WeatherBench2 ECMWF IFS-ENS (50-member archive)...")
+        ecmwf = open_ifs_ens_wb2()
+        init_ts = D + pd.Timedelta(hours=args.forecast_init_hour)
+    else:
+        print(f"[prep] opening ECMWF {'pencil zarr' if args.pencil else 'icechunk'}...")
+        ecmwf = open_ecmwf_store(args.pencil)
+        init_ts = D
     init_dates = pd.to_datetime(ecmwf.init_date.values)
-    if D not in init_dates:
-        raise SystemExit(f"[prep] init_date {D.date()} not in ECMWF store "
-                         f"(range {init_dates.min().date()}..{init_dates.max().date()})")
+    if init_ts not in init_dates:
+        raise SystemExit(f"[prep] init_date {init_ts} not in forecast store "
+                         f"'{args.forecast_source}' (range "
+                         f"{init_dates.min()}..{init_dates.max()})")
 
-    accums = ecmwf_window_accums(ecmwf, D)
+    accums = ecmwf_window_accums(ecmwf, init_ts)
     for k in list(accums):
         accums[k] = accums[k].load()
     print(f"[prep] ECMWF accums loaded for {list(accums)}")
