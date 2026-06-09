@@ -167,3 +167,6 @@ coiled-data-*.json
 *-key.json
 *-keyfile.json
 service_account/*.json
+
+# WB2 IFS-ENS collected forecast cubes (large, regenerate via collect_wb2_ifs_events.py)
+flood_ibf/wb2_ifs_ens/**/forecast_accums.nc

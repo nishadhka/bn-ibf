@@ -35,7 +35,7 @@ COST_LOSS_RATIO="${COST_LOSS_RATIO:-0.2}"
 UV_PKGS=(
   --with icechunk --with xarray --with "zarr>=3"
   --with numpy --with pandas --with geopandas --with regionmask
-  --with netcdf4 --with pyarrow --with scipy --with fsspec --with s3fs --with gcsfs
+  --with netcdf4 --with pyarrow --with scipy --with fsspec --with s3fs --with gcsfs --with bottleneck
 )
 
 # ---- resolve window from flood_events.yaml ----

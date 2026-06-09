@@ -1,4 +1,4 @@
-#!/usr/bin/env -S uv run --with icechunk --with xarray --with "zarr>=3" --with numpy --with pandas --with geopandas --with regionmask --with netcdf4 --with pyarrow --with scipy --with fsspec --with s3fs --with gcsfs
+#!/usr/bin/env -S uv run --with icechunk --with xarray --with "zarr>=3" --with numpy --with pandas --with geopandas --with regionmask --with netcdf4 --with pyarrow --with scipy --with fsspec --with s3fs --with gcsfs --with bottleneck
 """
 Flood BN IBF v1 — per-day admin-1 input generator.
 
@@ -88,7 +88,8 @@ WB2_IFS_ENS_STORE = "gs://weatherbench2/datasets/ifs_ens/2016-2024-1440x721.zarr
 
 
 def open_ifs_ens_wb2(store: str = WB2_IFS_ENS_STORE,
-                     bbox: tuple[float, float, float, float] = EA_BBOX) -> xr.Dataset:
+                     bbox: tuple[float, float, float, float] = EA_BBOX,
+                     max_lead_h: int = 168) -> xr.Dataset:
     """Open the WeatherBench2 ECMWF IFS-ENS archive (50-member, 0.25°,
     2016-2024, 15-day 6-hourly leads) and normalize it to the same
     interface the icechunk ECMWF store exposes, so the rest of the pipeline
@@ -120,11 +121,28 @@ def open_ifs_ens_wb2(store: str = WB2_IFS_ENS_STORE,
         "prediction_timedelta": "lead_time",
         "latitude": "lat", "longitude": "lon",
     })
+    # Cap the lead axis at the longest duration the pipeline uses (7-day=168 h).
+    # This keeps the gap-filling interpolation below (which must load the whole
+    # lead axis) from pulling the full 15-day forecast (61 leads → ~29).
+    tp = tp.sel(lead_time=slice(np.timedelta64(0, "h"),
+                               np.timedelta64(int(max_lead_h), "h")))
     # Ensure lead_time is timedelta64 (decode_timedelta usually handles the
     # 'hours' units; coerce if it arrives as a plain integer hour index).
     if not np.issubdtype(tp.lead_time.dtype, np.timedelta64):
         tp = tp.assign_coords(
             lead_time=tp.lead_time.astype("int64") * np.timedelta64(1, "h"))
+    # WB2's raw cumulative total_precipitation has scattered all-NaN lead steps
+    # (missing de-accumulation steps, different per init — e.g. 6 h always, plus
+    # an init-dependent handful like 24/72/120/150 h). Because the field is
+    # cumulative-since-init and therefore monotonic non-decreasing in lead, we
+    # fill those interior gaps by linear interpolation over lead_time so every
+    # duration accumulation is well-defined (instead of intermittently NaN).
+    # interpolate_na fills interior gaps; ffill/bfill handle a NaN at the first
+    # or last retained lead (e.g. 168 h itself missing) — carrying the nearest
+    # valid cumulative value is a small, conservative fill given monotonicity.
+    tp = (tp.chunk({"lead_time": -1})
+            .interpolate_na(dim="lead_time", method="linear")
+            .ffill(dim="lead_time").bfill(dim="lead_time"))
     return tp.to_dataset(name="tp")
 
 

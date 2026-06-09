@@ -134,16 +134,20 @@ The generalized DBN driver `run_flood_dbn_window.jl` (`--input-dir/--out-dir/
 
 ## 5. Caveats specific to the WB2 IFS-ENS hindcast
 
-1. **6-hourly leads → 12 h effective finest duration.** WB2 IFS-ENS leads are
-   6-hourly, and the raw cumulative `total_precipitation` is NaN at the 6 h lead
-   (a known de-accumulation gap, also at 120 h/150 h, which no pipeline duration
-   selects). So of the seven durations (3/6/12/24/48/72 h, 7 d): **3 h snaps to
-   lead 0 h (→ 0)** and **6 h is NaN**, both of which contribute nothing to the
-   `max`-over-durations exceedance/tail; **12 h, 24 h, 48 h, 72 h, 7 d are clean
-   and physical** (verified for 2019-05-15: 24 h ensemble mean ≈ 2 mm,
-   max ≈ 235 mm, exceedance reaching 0.88 at peak pixels). Short sub-daily
-   convective bursts that only register at 3–6 h are therefore not captured for
-   these hindcasts — the effective finest accumulation window is 12 h.
+1. **6-hourly leads + scattered NaN-lead gaps → gap-filled by interpolation.**
+   WB2 IFS-ENS leads are 6-hourly, and the raw cumulative `total_precipitation`
+   has **all-NaN lead steps scattered across the forecast, different per init**
+   (always 6 h, plus an init-dependent handful, e.g. 24/48/72/120/150 h). Because
+   the field is cumulative-since-init and therefore monotonic in lead,
+   `open_ifs_ens_wb2()` caps the lead axis at 168 h (7 d, the longest duration
+   used) and fills those gaps by **linear interpolation over `lead_time`** plus
+   `ffill`/`bfill` at the ends (needs `bottleneck`). After filling, every
+   duration accumulation is well-defined; verified for the Apr-2024 Kenya window
+   (24 h ens-max 132–1001 mm, 7 d ens-max 0.9–2.1 m, exceedance pixels
+   3 300–5 600/day, no gaps). The only duration not independently observed is
+   **3 h** (snaps to lead 0 h → 0); 6 h is the interpolated value between 0 and
+   12 h. The effective finest *independent* accumulation window is therefore
+   12 h, so short sub-daily convective bursts seen only at 3–6 h are not resolved.
 2. **50 vs 51 members.** WB2 IFS-ENS has 50 members vs the operational store's
    51; exceedance/tail denominators (`mean(dim=member)`) adjust automatically.
 3. **Forecast hindcast, not perfect foresight.** These are genuine archived
@@ -157,10 +161,49 @@ The generalized DBN driver `run_flood_dbn_window.jl` (`--input-dir/--out-dir/
 
 ## 6. Results
 
-_To be filled after running._ For each event, tabulate the peak CRMA state
-reached in the affected admin-1 boundary around the event days and the lead
-time, mirroring the Nairobi validation table in
-`flood_bn_ibf_run_notes_2026-03.md` §2.
+### 6a. Forecast collection (`collect_wb2_ifs_events.py`)
+
+`collect_wb2_ifs_events.py` pulls the WB2 IFS-ENS forecast for all 11 windows
+and writes, per event, under `wb2_ifs_ens/<key>/`:
+`forecast_accums.nc` (the 50-member duration-accumulation cube
+`(init_date, duration, member, lat, lon)` in mm + `exceedance_frac`, `p_heavy`,
+`ens_max_ratio` grids) and `summary.csv`; plus a combined
+`wb2_ifs_ens/events_summary.csv`. This is the full forecast side of the BN
+inputs on the WB2 grid — everything except the admin-1 zonal step (which needs
+`icpac_adm1v3.geojson`). Run: `./collect_wb2_ifs_events.py [--only <key> ...]`.
+
+**Domain-wide forecast exceedance signal vs the CMORPH 2-yr RP** (East-Africa
+box, all 50 members; `p_heavy` = peak-pixel ensemble exceedance fraction,
+`px_exceed` = pixels where ≥1 member crosses the 2-yr RP at the event peak day):
+
+| event | country | peak-day p_heavy | peak-day px_exceed | peak-day ens24h_mm | peak-day ens7d_mm | window-max px_exceed (day) |
+|-------|---------|-----------------:|-------------------:|-------------------:|------------------:|---------------------------:|
+| bdi_2024_04 | Burundi     | 1.00 | 3090 | 282 | 652  | 4419 (d+9) |
+| dji_2019_11 | Djibouti    | 1.00 | 6164 | 184 | 573  | 6164 (d+0) |
+| eri_2019_08 | Eritrea     | 1.00 | 3959 | 110 | 382  | 4375 (d+1) |
+| eth_2021_05 | Ethiopia    | 0.96 |  127 | 123 | 254  |  978 (d−5) |
+| ken_2024_04 | Kenya       | 1.00 | 4419 | 177 | 1017 | 5620 (d+5) |
+| rwa_2023_05 | Rwanda      | 0.86 |  975 |  77 | 200  | 3444 (d−5) |
+| sdn_2019_08 | Sudan       | 1.00 | 2023 | 237 | 322  | 3695 (d−3) |
+| som_2023_09 | Somalia     | 1.00 |  533 | 347 | 651  |  764 (d+3) |
+| ssd_2019_10 | South Sudan | 1.00 | 5177 | 307 | 389  | 5240 (d−3) |
+| tza_2024_04 | Tanzania    | 1.00 | 3090 | 282 | 652  | 4419 (d+9) |
+| uga_2019_05 | Uganda      | 0.96 | 2592 | 236 | 446  | 3508 (d+3) |
+
+(Burundi and Tanzania are identical here because both peak 2024-04-15 → the same
+15-day window over the same East-Africa forecast field; they separate only at the
+admin-1 level.) All 11 events show a strong forecast exceedance signal across
+their window — the WB2 IFS-ENS forecast "saw" heavy rain crossing the 2-yr RP at
+each event. These are **domain-wide** statistics; the per-event peak day reflects
+the heaviest pixel anywhere in East Africa, not necessarily the affected country.
+
+### 6b. Admin-1 CRMA validation (pending the BN run)
+
+The boundary-level CRMA table — peak state in the affected admin-1 around the
+event days, mirroring the Nairobi validation in
+`flood_bn_ibf_run_notes_2026-03.md` §2 — requires the full BN run via
+`./run_flood_event.sh <key>`, which needs `icpac_adm1v3.geojson` and a Julia
+environment (neither present on the collection host).
 
 | event | affected adm-1 | peak CRMA (event window) | lead vs peak | notes |
 |-------|----------------|--------------------------|--------------|-------|
