@@ -506,11 +506,160 @@ def classify_trend(slope: float, band: float) -> str:
     return "Stable"
 
 
+def imerg_union_daily_adm(imerg: xr.Dataset, imerg_mask, lat, n_adm: int,
+                          start: pd.Timestamp, end: pd.Timestamp) -> dict:
+    """Pre-load the IMERG daily admin-1 totals for the whole union window
+    [start, end) ONCE (consecutive target days' 7-day antecedent windows
+    overlap ~85%, so per-day reloading is wasteful). Returns {date -> (n_adm,)}
+    array of zonal-mean daily totals (mm). Mirrors imerg_daily_totals' masking."""
+    hh = imerg.precipitation.sel(time=slice(start, end - pd.Timedelta(seconds=1)))
+    hh = hh.where(hh >= 0.0)              # mask -9999.9 fill
+    daily = (hh * 0.5).resample(time="1D").sum().load()
+    dates = pd.to_datetime(daily.time.values)
+    out = {}
+    for di in range(daily.sizes["time"]):
+        adm = zonal_reduce(daily.isel(time=di), imerg_mask, lat, n_adm)
+        out[pd.Timestamp(dates[di]).normalize()] = adm
+    return out
+
+
+def process_one_date(D, init_ts, out_path: Path, args, *, adm1, n_adm, country,
+                     daily_adm_union, ecmwf, thresh_ec, ec_mask, ref_lat) -> bool:
+    """Compute and write the per-day evidence CSV for target date D using the
+    pre-opened stores, pre-built masks, and pre-computed IMERG union totals.
+    Returns True on success."""
+    # ---------------- IMERG antecedent (from pre-loaded union) ----------------
+    # 7-day window [D-7, D): calendar days D-7 .. D-1, in chronological order.
+    wdays = [(pd.Timestamp(D).normalize() - pd.Timedelta(days=k)) for k in range(7, 0, -1)]
+    daily_adm = np.vstack([daily_adm_union.get(d, np.full(n_adm, np.nan)) for d in wdays])
+    antecedent_mm = np.nansum(daily_adm, axis=0)
+    antecedent_mm[np.isnan(daily_adm).all(axis=0)] = np.nan
+    x = np.arange(daily_adm.shape[0], dtype=np.float64)
+    slopes = np.full(n_adm, np.nan)
+    for i in range(n_adm):
+        y = daily_adm[:, i]
+        if np.isfinite(y).all():
+            slopes[i] = float(np.polyfit(x, y, 1)[0])
+    trend_cls = np.array([classify_trend(s, args.trend_band) for s in slopes])
+
+    # ---------------- ECMWF / IFS-ENS exceedance ----------------
+    # Load the (gap-filled) forecast for this init ONCE, then slice each
+    # duration from memory — calling .load() per-duration would otherwise
+    # re-run the whole lead-axis interpolation 7× (the dominant per-day cost).
+    tp_init = ecmwf.tp.sel(init_date=init_ts).load()  # (member, lead_time, lat, lon) mm-of-m
+    lt = tp_init.lead_time.values
+    accums = {}
+    for dur, h in DURATION_HOURS.items():
+        td = np.timedelta64(h, "h")
+        idx_arr = np.where(lt == td)[0]
+        idx = int(idx_arr[0]) if idx_arr.size else int(np.argmin(np.abs(lt - td)))
+        accums[dur] = (tp_init.isel(lead_time=idx) * 1000.0).astype("float32")  # → mm
+
+    eprob = {}
+    ens_max_ratio_per_dur = {}
+    for dur in DURATIONS:
+        exceeds = (accums[dur] >= thresh_ec[dur]).astype("float32")
+        eprob[dur] = exceeds.mean(dim="member")
+        ens_max_mm = accums[dur].max(dim="member")
+        safe_thresh = thresh_ec[dur].where(thresh_ec[dur] > 0, 1.0)
+        ens_max_ratio_per_dur[dur] = ens_max_mm / safe_thresh
+    eprob_24 = eprob["24hr"]
+    p_heavy = xr.concat([eprob[d] for d in DURATIONS], dim="duration").max("duration")
+    max_ratio = xr.concat([ens_max_ratio_per_dur[d] for d in DURATIONS],
+                          dim="duration").max("duration")
+    ens_mean_24h = accums["24hr"].mean(dim="member")
+    ens_max_24h = accums["24hr"].max(dim="member")
+    ens_min_24h = accums["24hr"].min(dim="member")
+
+    eprob_heavy_adm = zonal_reduce(p_heavy, ec_mask, ref_lat, n_adm)
+    eprob_24h_adm = zonal_reduce(eprob_24, ec_mask, ref_lat, n_adm)
+    spatial_cov_adm = zonal_reduce(p_heavy, ec_mask, ref_lat, n_adm, thresh=0.5)
+    max_ratio_mean_adm = zonal_reduce(max_ratio, ec_mask, ref_lat, n_adm)
+    max_ratio_p95_adm = zonal_quantile(max_ratio, ec_mask, n_adm, q=0.95)
+    max_ratio_peak_adm = zonal_max(max_ratio, ec_mask, n_adm)
+    hotspot_frac_adm = zonal_reduce(max_ratio, ec_mask, ref_lat, n_adm, thresh=1.0)
+    ens_mean_24h_adm = zonal_reduce(ens_mean_24h, ec_mask, ref_lat, n_adm)
+    ens_max_24h_adm = zonal_reduce(ens_max_24h, ec_mask, ref_lat, n_adm)
+    ens_min_24h_adm = zonal_reduce(ens_min_24h, ec_mask, ref_lat, n_adm)
+
+    eprob_heavy_adm = fill_small_boundaries(eprob_heavy_adm, p_heavy, adm1)
+    eprob_24h_adm = fill_small_boundaries(eprob_24h_adm, eprob_24, adm1)
+    spatial_cov_adm = fill_small_boundaries(spatial_cov_adm, p_heavy, adm1, thresh=0.5)
+    max_ratio_mean_adm = fill_small_boundaries(max_ratio_mean_adm, max_ratio, adm1)
+    max_ratio_p95_adm = fill_small_boundaries(max_ratio_p95_adm, max_ratio, adm1)
+    max_ratio_peak_adm = fill_small_boundaries(max_ratio_peak_adm, max_ratio, adm1)
+    hotspot_frac_adm = fill_small_boundaries(hotspot_frac_adm, max_ratio, adm1, thresh=1.0)
+    ens_mean_24h_adm = fill_small_boundaries(ens_mean_24h_adm, ens_mean_24h, adm1)
+    ens_max_24h_adm = fill_small_boundaries(ens_max_24h_adm, ens_max_24h, adm1)
+    ens_min_24h_adm = fill_small_boundaries(ens_min_24h_adm, ens_min_24h, adm1)
+
+    # ---------------- Assemble output ----------------
+    spatial_cov_final = np.fmax(spatial_cov_adm, hotspot_frac_adm)
+    df = pd.DataFrame({
+        "id": adm1["GID_1"],
+        "name": adm1["NAME_1"],
+        "country": country,
+        "antecedent_rainfall_mm": np.round(antecedent_mm, 3),
+        "antecedent_category": "",
+        "rainfall_trend": trend_cls,
+        "trend_slope_mm_per_day": np.round(slopes, 3),
+        "ecmwf_eprob_heavy": np.round(eprob_heavy_adm, 4),
+        "eprob_24h": np.round(eprob_24h_adm, 4),
+        "spatial_coverage": np.round(spatial_cov_final, 4),
+        "spatial_cov_mean_p": np.round(spatial_cov_adm, 4),
+        "hotspot_fraction": np.round(hotspot_frac_adm, 4),
+        "forecast_agreement": "Medium",
+        "ens_max_ratio": np.round(max_ratio_p95_adm, 4),
+        "ens_max_ratio_mean": np.round(max_ratio_mean_adm, 4),
+        "ens_max_ratio_peak": np.round(max_ratio_peak_adm, 4),
+        "ens_mean_24h_mm": np.round(ens_mean_24h_adm, 2),
+        "ens_max_24h_mm": np.round(ens_max_24h_adm, 2),
+        "ens_min_24h_mm": np.round(ens_min_24h_adm, 2),
+        "target_date": str(D.date()),
+    })
+    if args.soft_evidence:
+        add_soft_columns(df, ant_mm=antecedent_mm, exc=eprob_heavy_adm,
+                         spa=spatial_cov_final, trn_slope=slopes,
+                         tail_ratio=max_ratio_p95_adm)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out_path, index=False)
+    print(f"[prep] {D.date()} -> {out_path.name}  rows={len(df)}  "
+          f"ant_mean={np.nanmean(antecedent_mm):.1f}mm  "
+          f"heavy_mean={np.nanmean(eprob_heavy_adm):.3f}")
+
+    if args.member_evidence_sidecar:
+        me_df = compute_per_member_evidence(
+            accums, thresh_ec, ec_mask, adm1, n_adm,
+            antecedent_mm, slopes, args.trend_band,
+            target_date=str(D.date()), soft=args.soft_evidence)
+        me_path = Path(args.member_evidence_sidecar)
+        me_path.parent.mkdir(parents=True, exist_ok=True)
+        me_df.to_csv(me_path, index=False)
+        print(f"[prep] wrote member-evidence sidecar {me_path}  rows={len(me_df)}")
+    if args.member_sidecar:
+        member_df = compute_per_member_ratios(accums, thresh_ec, ec_mask, adm1, n_adm)
+        sc = Path(args.member_sidecar)
+        sc.parent.mkdir(parents=True, exist_ok=True)
+        member_df.to_csv(sc, index=False)
+        print(f"[prep] wrote member sidecar {sc}  rows={len(member_df)}")
+    return True
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--date", required=True, help="Target date D (YYYY-MM-DD)")
+    ap.add_argument("--date", required=True, help="Target date D (YYYY-MM-DD); "
+                    "start date when --end-date is given")
+    ap.add_argument("--end-date", default=None,
+                    help="If set, process the inclusive range --date..--end-date "
+                         "in one process (opens stores + builds masks once — much "
+                         "faster than 15 separate invocations). Requires --out-dir.")
+    ap.add_argument("--out-dir", default=None,
+                    help="Output directory for range mode; per-day files are "
+                         "written as flood_inputs_<D>[_soft].csv.")
     ap.add_argument("--rp-years", type=int, default=2)
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--out", default=None,
+                    help="Output CSV for single-date mode (required without --end-date).")
     ap.add_argument("--adm1", default="icpac_adm1v3.geojson")
     ap.add_argument("--cmorph-rp", default="cmorph_ea_return_periods.nc",
                     help="Local CMORPH return-period NetCDF (used only when "
@@ -547,57 +696,48 @@ def main() -> None:
                          "for storyline BN runs (one row per boundary × member)")
     args = ap.parse_args()
 
-    D = pd.Timestamp(args.date)
-    print(f"[prep] D={D.date()}  RP={args.rp_years}yr  band=±{args.trend_band} mm/day")
+    # ---- resolve date list + output paths (single vs range mode) ----
+    suffix = "_soft" if args.soft_evidence else ""
+    if args.end_date:
+        if not args.out_dir:
+            ap.error("--end-date requires --out-dir")
+        dates = list(pd.date_range(args.date, args.end_date, freq="D"))
+        out_dir = Path(args.out_dir)
+        out_for = {D: out_dir / f"flood_inputs_{D.date()}{suffix}.csv" for D in dates}
+    else:
+        if not args.out:
+            ap.error("--out is required in single-date mode (no --end-date)")
+        dates = [pd.Timestamp(args.date)]
+        out_for = {dates[0]: Path(args.out)}
+    print(f"[prep] {len(dates)} date(s) {dates[0].date()}..{dates[-1].date()}  "
+          f"RP={args.rp_years}yr  band=±{args.trend_band} mm/day  src={args.forecast_source}")
 
+    # ================= one-time setup (date-independent) =================
     adm1 = gpd.read_file(args.adm1).reset_index(drop=True)
     n_adm = len(adm1)
+    country = (adm1["GID_1"].str.split(".").str[0]
+               .map(ISO_TO_COUNTRY).fillna("Unknown"))
     print(f"[prep] adm1 boundaries: {n_adm}")
 
-    # ---------------- IMERG antecedent ----------------
     print("[prep] opening IMERG icechunk...")
     imerg = open_icechunk("observations/imerg_hh_icechunk")
-    daily = imerg_daily_totals(imerg, D).load()
-    t0 = pd.to_datetime(daily.time.values[0]).date()
-    t1 = pd.to_datetime(daily.time.values[-1]).date()
-    print(f"[prep] IMERG 7-day totals {t0}..{t1}  shape={daily.shape}")
+    imerg_mask = build_mask(adm1, imerg.lat, imerg.lon)
+    # Pre-load the IMERG daily admin-1 totals for the whole antecedent union
+    # window [min(dates)-7, max(dates)) ONCE (per-day reloading overlaps ~85%).
+    u_start = (dates[0].normalize() - pd.Timedelta(days=7))
+    u_end = dates[-1].normalize()
+    print(f"[prep] pre-loading IMERG union {u_start.date()}..{u_end.date()} "
+          f"({(u_end - u_start).days} days)...")
+    daily_adm_union = imerg_union_daily_adm(imerg, imerg_mask, imerg.lat, n_adm,
+                                            u_start, u_end)
 
-    imerg_mask = build_mask(adm1, daily.lat, daily.lon)
-
-    daily_adm = np.full((daily.sizes["time"], n_adm), np.nan, dtype=np.float64)
-    for di in range(daily.sizes["time"]):
-        daily_adm[di] = zonal_reduce(daily.isel(time=di), imerg_mask, daily.lat, n_adm)
-
-    antecedent_mm = np.nansum(daily_adm, axis=0)
-    antecedent_mm[np.isnan(daily_adm).all(axis=0)] = np.nan
-
-    x = np.arange(daily.sizes["time"], dtype=np.float64)
-    slopes = np.full(n_adm, np.nan)
-    for i in range(n_adm):
-        y = daily_adm[:, i]
-        if np.isfinite(y).all():
-            slopes[i] = float(np.polyfit(x, y, 1)[0])
-    trend_cls = np.array([classify_trend(s, args.trend_band) for s in slopes])
-
-    # ---------------- ECMWF exceedance ----------------
     if args.forecast_source == "ifs_ens_wb2":
         print("[prep] opening WeatherBench2 ECMWF IFS-ENS (50-member archive)...")
         ecmwf = open_ifs_ens_wb2()
-        init_ts = D + pd.Timedelta(hours=args.forecast_init_hour)
     else:
         print(f"[prep] opening ECMWF {'pencil zarr' if args.pencil else 'icechunk'}...")
         ecmwf = open_ecmwf_store(args.pencil)
-        init_ts = D
     init_dates = pd.to_datetime(ecmwf.init_date.values)
-    if init_ts not in init_dates:
-        raise SystemExit(f"[prep] init_date {init_ts} not in forecast store "
-                         f"'{args.forecast_source}' (range "
-                         f"{init_dates.min()}..{init_dates.max()})")
-
-    accums = ecmwf_window_accums(ecmwf, init_ts)
-    for k in list(accums):
-        accums[k] = accums[k].load()
-    print(f"[prep] ECMWF accums loaded for {list(accums)}")
 
     if args.cmorph_source == "icechunk":
         print(f"[prep] CMORPH RP from icechunk: {args.cmorph_rp_prefix}")
@@ -605,127 +745,29 @@ def main() -> None:
     else:
         print(f"[prep] CMORPH RP from NetCDF: {args.cmorph_rp}")
         thresh = load_cmorph_thresholds(args.cmorph_rp, args.rp_years)
-    ref = accums["24hr"].isel(member=0)
-    thresh_ec = {dur: regrid_to(thresh[dur], ref.lat, ref.lon) for dur in DURATIONS}
+    ref_lat, ref_lon = ecmwf.tp.lat, ecmwf.tp.lon
+    thresh_ec = {dur: regrid_to(thresh[dur], ref_lat, ref_lon).load() for dur in DURATIONS}
+    ec_mask = build_mask(adm1, ref_lat, ref_lon)
+    print("[prep] one-time setup done (masks + CMORPH thresholds)")
 
-    eprob = {}
-    ens_max_ratio_per_dur = {}
-    for dur in DURATIONS:
-        exceeds = (accums[dur] >= thresh_ec[dur]).astype("float32")
-        eprob[dur] = exceeds.mean(dim="member")
-        ens_max_mm = accums[dur].max(dim="member")
-        ens_min_mm = accums[dur].min(dim="member")
-        safe_thresh = thresh_ec[dur].where(thresh_ec[dur] > 0, 1.0)
-        ens_max_ratio_per_dur[dur] = ens_max_mm / safe_thresh
-    eprob_24 = eprob["24hr"]
-    p_heavy = xr.concat([eprob[d] for d in DURATIONS], dim="duration").max("duration")
-
-    # Tail risk: max across durations of (ens_max / threshold) per pixel
-    max_ratio = xr.concat([ens_max_ratio_per_dur[d] for d in DURATIONS],
-                          dim="duration").max("duration")
-
-    # Ensemble mean and max at 24h for diagnostics
-    ens_mean_24h = accums["24hr"].mean(dim="member")
-    ens_max_24h = accums["24hr"].max(dim="member")
-    ens_min_24h = accums["24hr"].min(dim="member")
-
-    ec_mask = build_mask(adm1, ref.lat, ref.lon)
-    eprob_heavy_adm = zonal_reduce(p_heavy, ec_mask, ref.lat, n_adm)
-    eprob_24h_adm = zonal_reduce(eprob_24, ec_mask, ref.lat, n_adm)
-    spatial_cov_adm = zonal_reduce(p_heavy, ec_mask, ref.lat, n_adm, thresh=0.5)
-
-    # Pixel-level tail aggregation (upgrade from boundary-mean)
-    max_ratio_mean_adm = zonal_reduce(max_ratio, ec_mask, ref.lat, n_adm)
-    max_ratio_p95_adm = zonal_quantile(max_ratio, ec_mask, n_adm, q=0.95)
-    max_ratio_peak_adm = zonal_max(max_ratio, ec_mask, n_adm)
-    hotspot_frac_adm = zonal_reduce(max_ratio, ec_mask, ref.lat, n_adm, thresh=1.0)
-
-    ens_mean_24h_adm = zonal_reduce(ens_mean_24h, ec_mask, ref.lat, n_adm)
-    ens_max_24h_adm = zonal_reduce(ens_max_24h, ec_mask, ref.lat, n_adm)
-    ens_min_24h_adm = zonal_reduce(ens_min_24h, ec_mask, ref.lat, n_adm)
-
-    eprob_heavy_adm = fill_small_boundaries(eprob_heavy_adm, p_heavy, adm1)
-    eprob_24h_adm = fill_small_boundaries(eprob_24h_adm, eprob_24, adm1)
-    spatial_cov_adm = fill_small_boundaries(spatial_cov_adm, p_heavy, adm1, thresh=0.5)
-    max_ratio_mean_adm = fill_small_boundaries(max_ratio_mean_adm, max_ratio, adm1)
-    max_ratio_p95_adm = fill_small_boundaries(max_ratio_p95_adm, max_ratio, adm1)
-    max_ratio_peak_adm = fill_small_boundaries(max_ratio_peak_adm, max_ratio, adm1)
-    hotspot_frac_adm = fill_small_boundaries(hotspot_frac_adm, max_ratio, adm1, thresh=1.0)
-    ens_mean_24h_adm = fill_small_boundaries(ens_mean_24h_adm, ens_mean_24h, adm1)
-    ens_max_24h_adm = fill_small_boundaries(ens_max_24h_adm, ens_max_24h, adm1)
-    ens_min_24h_adm = fill_small_boundaries(ens_min_24h_adm, ens_min_24h, adm1)
-
-    # ---------------- Assemble output ----------------
-    country = (adm1["GID_1"].str.split(".").str[0]
-               .map(ISO_TO_COUNTRY).fillna("Unknown"))
-
-    # Spatial coverage now blends the classical P_heavy mask with the
-    # pixel-level hotspot fraction (pixels where any member exceeds threshold).
-    # Use the max of the two so localized hotspots aren't smoothed away.
-    spatial_cov_final = np.fmax(spatial_cov_adm, hotspot_frac_adm)
-
-    df = pd.DataFrame({
-        "id": adm1["GID_1"],
-        "name": adm1["NAME_1"],
-        "country": country,
-        "antecedent_rainfall_mm": np.round(antecedent_mm, 3),
-        "antecedent_category": "",
-        "rainfall_trend": trend_cls,
-        "trend_slope_mm_per_day": np.round(slopes, 3),
-        "ecmwf_eprob_heavy": np.round(eprob_heavy_adm, 4),
-        "eprob_24h": np.round(eprob_24h_adm, 4),
-        "spatial_coverage": np.round(spatial_cov_final, 4),
-        "spatial_cov_mean_p": np.round(spatial_cov_adm, 4),
-        "hotspot_fraction": np.round(hotspot_frac_adm, 4),
-        "forecast_agreement": "Medium",
-        "ens_max_ratio": np.round(max_ratio_p95_adm, 4),  # now p95 (pixel-level)
-        "ens_max_ratio_mean": np.round(max_ratio_mean_adm, 4),
-        "ens_max_ratio_peak": np.round(max_ratio_peak_adm, 4),
-        "ens_mean_24h_mm": np.round(ens_mean_24h_adm, 2),
-        "ens_max_24h_mm": np.round(ens_max_24h_adm, 2),
-        "ens_min_24h_mm": np.round(ens_min_24h_adm, 2),
-        "target_date": str(D.date()),
-    })
-
-    if args.soft_evidence:
-        add_soft_columns(df,
-                         ant_mm     = antecedent_mm,
-                         exc        = eprob_heavy_adm,
-                         spa        = spatial_cov_final,
-                         trn_slope  = slopes,
-                         tail_ratio = max_ratio_p95_adm)
-        print(f"[prep] soft-evidence columns added (20 cols)")
-
-    out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(out, index=False)
-    print(f"[prep] wrote {out}  rows={len(df)}  cols={len(df.columns)}  "
-          f"ant_mean={np.nanmean(antecedent_mm):.1f}mm  "
-          f"heavy_mean={np.nanmean(eprob_heavy_adm):.3f}")
-
-    if args.member_evidence_sidecar:
-        me_df = compute_per_member_evidence(
-            accums, thresh_ec, ec_mask, adm1, n_adm,
-            antecedent_mm, slopes, args.trend_band,
-            target_date=str(D.date()),
-            soft=args.soft_evidence,
-        )
-        me_path = Path(args.member_evidence_sidecar)
-        me_path.parent.mkdir(parents=True, exist_ok=True)
-        me_df.to_csv(me_path, index=False)
-        n_crossing = (me_df["member_max_ratio"] >= 1.0).sum()
-        print(f"[prep] wrote member-evidence sidecar {me_path}  rows={len(me_df)}  "
-              f"threshold_crossing={n_crossing} ({n_crossing/len(me_df)*100:.1f}%)")
-
-    if args.member_sidecar:
-        member_df = compute_per_member_ratios(accums, thresh_ec, ec_mask, adm1, n_adm)
-        sidecar_path = Path(args.member_sidecar)
-        sidecar_path.parent.mkdir(parents=True, exist_ok=True)
-        member_df.to_csv(sidecar_path, index=False)
-        n_crossing = (member_df["max_ratio"] >= 1.0).sum()
-        n_rows = len(member_df)
-        print(f"[prep] wrote member sidecar {sidecar_path}  rows={n_rows}  "
-              f"threshold_crossing_members={n_crossing} ({n_crossing/n_rows*100:.1f}%)")
+    # ================= per-date loop =================
+    n_ok = 0
+    for D in dates:
+        init_ts = (D + pd.Timedelta(hours=args.forecast_init_hour)
+                   if args.forecast_source == "ifs_ens_wb2" else D)
+        if init_ts not in init_dates:
+            print(f"[prep] SKIP {D.date()}: init {init_ts} not in forecast store "
+                  f"(range {init_dates.min()}..{init_dates.max()})")
+            continue
+        try:
+            n_ok += int(process_one_date(
+                D, init_ts, out_for[D], args,
+                adm1=adm1, n_adm=n_adm, country=country,
+                daily_adm_union=daily_adm_union, ecmwf=ecmwf,
+                thresh_ec=thresh_ec, ec_mask=ec_mask, ref_lat=ref_lat))
+        except Exception as e:  # one bad day shouldn't sink the whole range
+            print(f"[prep] ERROR {D.date()}: {type(e).__name__}: {e}")
+    print(f"[prep] done: {n_ok}/{len(dates)} dates written")
 
 
 if __name__ == "__main__":

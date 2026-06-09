@@ -66,20 +66,19 @@ echo "  Flood BN-IBF event hindcast: $KEY ($COUNTRY)"
 echo "  peak=$PEAK  window=$START .. $END  RP=${RP_YEARS}yr  forecast=ifs_ens_wb2"
 echo "================================================================"
 
-# ---- Step 1: per-day soft-evidence prep (IFS-ENS forecast + IMERG antecedent) ----
-D="$START"
-while [[ "$D" < "$(date -I -d "$END + 1 day")" ]]; do
-  IN_CSV="$IN_DIR/flood_inputs_${D}_soft.csv"
-  echo "[prep] $KEY $D -> $IN_CSV"
-  uv run "${UV_PKGS[@]}" python flood_data_prep.py \
-      --date "$D" \
-      --rp-years "$RP_YEARS" \
-      --forecast-source ifs_ens_wb2 \
-      --soft-evidence \
-      --adm1 "$ADM1" \
-      --out "$IN_CSV"
-  D="$(date -I -d "$D + 1 day")"
-done
+# ---- Step 1: soft-evidence prep for the whole 15-day window in one process ----
+# Range mode opens IMERG/IFS-ENS/CMORPH and builds masks ONCE, pre-loads the
+# IMERG antecedent union, and loads each forecast init once — ~30 s/day vs
+# ~3-6 min/day when each day was a separate invocation.
+echo "[prep] $KEY $START..$END -> $IN_DIR"
+uv run "${UV_PKGS[@]}" python flood_data_prep.py \
+    --date "$START" \
+    --end-date "$END" \
+    --rp-years "$RP_YEARS" \
+    --forecast-source ifs_ens_wb2 \
+    --soft-evidence \
+    --adm1 "$ADM1" \
+    --out-dir "$IN_DIR"
 
 # ---- Step 2: DBN sequence over the 15 days ----
 echo "[dbn] $KEY — run_flood_dbn_window.jl"
