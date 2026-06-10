@@ -13,8 +13,13 @@
 # event needs a different framing.
 
 defaults:
-  window_pre: 5      # days before peak (inclusive start = peak - window_pre)
-  window_post: 9     # days after peak  (inclusive end   = peak + window_post)
+  window_pre: 10     # days before peak (inclusive start = peak - window_pre)
+  window_post: 5     # days after peak  (inclusive end   = peak + window_post)
+  # 10 + peak + 5 = 16-day window: weights coverage toward the pre-event build-up
+  # (antecedent saturation + the full 7-day forecast lead-time to the peak; the
+  # earliest analysis day whose forecast reaches the peak is peak-7). Replaces the
+  # earlier Mar-2026-style 5/9 split. Each day is still its own BN analysis with a
+  # 7-day IMERG antecedent + IFS-ENS forecast out to 7 days.
   rp_years: 2
   cost_loss_ratio: 0.20
 

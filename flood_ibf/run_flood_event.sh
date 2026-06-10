@@ -57,8 +57,11 @@ print(start, end, peak, ev["country"].replace(" ", "_"))
 PY
 )
 
+NDAYS=$(( ( $(date -d "$END" +%s) - $(date -d "$START" +%s) ) / 86400 + 1 ))
+
 EVENT_DIR="output/events/$KEY"
 IN_DIR="$EVENT_DIR/bn_inputs"
+rm -rf "$EVENT_DIR"                 # clean slate — avoid mixing dates from a prior window
 mkdir -p "$IN_DIR" "$EVENT_DIR/bn-dag"
 
 echo "================================================================"
@@ -85,7 +88,7 @@ echo "[dbn] $KEY — run_flood_dbn_window.jl"
 julia --project=. run_flood_dbn_window.jl \
     --input-dir "$IN_DIR" \
     --out-dir   "$EVENT_DIR" \
-    --expect    15
+    --expect    "$NDAYS"
 
 # ---- Step 3: web artifacts (parquet + BN-DAG JSON) ----
 echo "[web] parquet + bn-dag JSON -> $EVENT_DIR"
