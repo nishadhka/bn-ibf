@@ -14,7 +14,8 @@ Replayed the validated 15-day flood BN-IBF routine over the **11 GHACOF73
 historical flood events** (2019–2024), using the **WeatherBench2 archived ECMWF
 IFS-ENS** 50-member forecast (`gs://weatherbench2/datasets/ifs_ens/2016-2024-1440x721.zarr`)
 in place of the recent-only operational store, plus IMERG antecedent and CMORPH
-2-yr return-period thresholds. Each event = a 15-day window `[peak−5, peak+9]`.
+2-yr return-period thresholds. Each event = a 16-day window `[peak−10, peak+5]`
+(see §2 for the window choice; an earlier pass used `[peak−5, peak+9]`).
 
 ```
  per event (×11):
@@ -31,100 +32,107 @@ in place of the recent-only operational store, plus IMERG antecedent and CMORPH
    upload_bn_artifacts.py      → gs://crma-mdx-store  (154 JSONs + 2 parquet)
 ```
 
-**Scale:** 11 events × 15 days = **165 boundary-days**, each over 227 admin-1
-regions and **50 ensemble members** ⇒ ~1.87 M boundary-member BN evaluations.
+**Scale:** 11 events × 16 days = **176 boundary-days**, each over 227 admin-1
+regions and **50 ensemble members** ⇒ ~2.0 M boundary-member BN evaluations.
 
-**Result (worst CRMA state reached in the affected country, within the window):**
+**Result (16-day window `[peak−10, peak+5]`; worst CRMA reached in the affected
+country, the day it occurs vs peak, and the earliest day reaching Assess+):**
 
-| event | country | peak | worst CRMA | day vs peak | #Actionable_Risk | #Assess+ |
-|-------|---------|------|------------|:-----------:|:----------------:|:--------:|
-| bdi_2024_04 | Burundi | 2024-04-15 | **Actionable_Risk** | −5 | 6 | 6 |
-| dji_2019_11 | Djibouti | 2019-11-21 | **Actionable_Risk** | −5 | 5 | 5 |
-| eri_2019_08 | Eritrea | 2019-08-15 | **Actionable_Risk** | −5 | 5 | 5 |
-| eth_2021_05 | Ethiopia | 2021-05-15 | Assess | −5 | 0 | 2 |
-| ken_2024_04 | Kenya | 2024-04-24 | **Actionable_Risk** | +2 | 15 | 33 |
-| rwa_2023_05 | Rwanda | 2023-05-02 | **Actionable_Risk** | −5 | 2 | 3 |
-| sdn_2019_08 | Sudan | 2019-08-25 | **Actionable_Risk** | −5 | 12 | 16 |
-| som_2023_09 | Somalia | 2023-09-25 | **Actionable_Risk** | +5 | 3 | 3 |
-| ssd_2019_10 | South Sudan | 2019-10-15 | Assess | −2 | 0 | 1 |
-| tza_2024_04 | Tanzania | 2024-04-15 | **Actionable_Risk** | +3 | 11 | 12 |
-| uga_2019_05 | Uganda | 2019-05-15 | **Actionable_Risk** | +6 | 8 | 19 |
+| event | country | peak | worst CRMA | worst day | #AR | #Assess+ | earliest Assess+ |
+|-------|---------|------|------------|:---------:|:---:|:--------:|:----------------:|
+| bdi_2024_04 | Burundi | 2024-04-15 | **Actionable_Risk** | +4 | 6 | 9 | −10 |
+| dji_2019_11 | Djibouti | 2019-11-21 | **Actionable_Risk** | −1 | 6 | 6 | −10 |
+| eri_2019_08 | Eritrea | 2019-08-15 | **Actionable_Risk** | −10 | 6 | 6 | −10 |
+| eth_2021_05 | Ethiopia | 2021-05-15 | **Actionable_Risk** | −10 | 1 | 3 | −10 |
+| ken_2024_04 | Kenya | 2024-04-24 | **Actionable_Risk** | −1 | 21 | 28 | −10 |
+| rwa_2023_05 | Rwanda | 2023-05-02 | **Actionable_Risk** | 0 | 2 | 5 | −10 |
+| sdn_2019_08 | Sudan | 2019-08-25 | **Actionable_Risk** | −10 | 14 | 18 | −10 |
+| som_2023_09 | Somalia | 2023-09-25 | **Actionable_Risk** | −2 | 5 | 5 | −3 |
+| ssd_2019_10 | South Sudan | 2019-10-15 | **Actionable_Risk** | 0 | 2 | 7 | −10 |
+| tza_2024_04 | Tanzania | 2024-04-15 | **Actionable_Risk** | −3 | 13 | 15 | −10 |
+| uga_2019_05 | Uganda | 2019-05-15 | **Actionable_Risk** | +5 | 6 | 15 | −10 |
 
-**9 of 11 reached Actionable_Risk (Red)**; Ethiopia and South Sudan reached
-Assess (Orange). Note several events peak at day −5 (window start) — see §2 for
-why, and what a more pre-event-weighted window would change. Full per-day
-timelines: `flood_events_run_notes.md` §6b. Delivered to the crma-api on GCS
-(§3 of `flood_events_run_notes.md` §6c).
+**All 11 events now reach Actionable_Risk (Red)** in the affected country (vs
+9/11 under the earlier 5/9 split — Ethiopia and South Sudan are promoted because
+the longer build-up window catches more high-risk days). Kenya is strongest
+(21 Red / 28 Assess+ boundaries).
+
+**Key finding — the risk window is *prolonged*, not a spike.** The earliest
+Assess+ day is **−10 (the window's first day) for 10 of 11 events**. The
+window-edge effect seen under 5/9 (events peaking at day −5) did not disappear —
+it **moved to day −10**. These are **wet-season saturation floods**: the ground
+is already saturated and rain is already forecast 10+ days before the peak, so
+the BN flags Assess/Actionable *continuously* through the rainy spell, and the
+build-up extends beyond even 10 days. For clean event-vs-background separation a
+future step would be an **anomaly framing** (risk above the seasonal norm) rather
+than only a longer window. Full per-day timelines: `flood_events_run_notes.md`
+§6b; GCS delivery: §6c.
 
 ---
 
 ## 2. Per-event window — what "before the event" means here
 
-Every event was run on a **15-day window anchored to a single best-known peak
-date**, `[peak − 5, peak + 9]` — i.e. **5 days before the peak and 9 days
-after** (the event sits at ~day 6 of 15, mirroring the operational Mar-2026 run,
-where the Nairobi flood of Mar 6–7 sat inside the Mar 1–15 window).
+The run uses a **16-day window anchored to a single best-known peak date**,
+`[peak − 10, peak + 5]` — **10 days before the peak + the peak + 5 after**. This
+replaced an earlier **5/9** split (`[peak−5, peak+9]`, copied from the Mar-2026
+operational layout) once we saw the risk signal was pressing against the
+5-day-before edge (see §1). The longer pre-window weights coverage toward the
+**build-up** and guarantees the full 7-day forecast lead-time to the peak is
+captured.
 
-| event | country | event peak (≈) | run window (15 d) | days **before** peak | days after |
+| event | country | event peak (≈) | run window (16 d) | days **before** peak | days after |
 |-------|---------|----------------|-------------------|:--------------------:|:----------:|
-| bdi_2024_04 | Burundi | 2024-04-15 | 2024-04-10 → 2024-04-24 | 5 | 9 |
-| dji_2019_11 | Djibouti | 2019-11-21 | 2019-11-16 → 2019-11-30 | 5 | 9 |
-| eri_2019_08 | Eritrea | 2019-08-15 | 2019-08-10 → 2019-08-24 | 5 | 9 |
-| eth_2021_05 | Ethiopia | 2021-05-15 | 2021-05-10 → 2021-05-24 | 5 | 9 |
-| ken_2024_04 | Kenya | 2024-04-24 | 2024-04-19 → 2024-05-03 | 5 | 9 |
-| rwa_2023_05 | Rwanda | 2023-05-02 | 2023-04-27 → 2023-05-11 | 5 | 9 |
-| sdn_2019_08 | Sudan | 2019-08-25 | 2019-08-20 → 2019-09-03 | 5 | 9 |
-| som_2023_09 | Somalia | 2023-09-25 | 2023-09-20 → 2023-10-04 | 5 | 9 |
-| ssd_2019_10 | South Sudan | 2019-10-15 | 2019-10-10 → 2019-10-24 | 5 | 9 |
-| tza_2024_04 | Tanzania | 2024-04-15 | 2024-04-10 → 2024-04-24 | 5 | 9 |
-| uga_2019_05 | Uganda | 2019-05-15 | 2019-05-10 → 2019-05-24 | 5 | 9 |
+| bdi_2024_04 | Burundi | 2024-04-15 | 2024-04-05 → 2024-04-20 | 10 | 5 |
+| dji_2019_11 | Djibouti | 2019-11-21 | 2019-11-11 → 2019-11-26 | 10 | 5 |
+| eri_2019_08 | Eritrea | 2019-08-15 | 2019-08-05 → 2019-08-20 | 10 | 5 |
+| eth_2021_05 | Ethiopia | 2021-05-15 | 2021-05-05 → 2021-05-20 | 10 | 5 |
+| ken_2024_04 | Kenya | 2024-04-24 | 2024-04-14 → 2024-04-29 | 10 | 5 |
+| rwa_2023_05 | Rwanda | 2023-05-02 | 2023-04-22 → 2023-05-07 | 10 | 5 |
+| sdn_2019_08 | Sudan | 2019-08-25 | 2019-08-15 → 2019-08-30 | 10 | 5 |
+| som_2023_09 | Somalia | 2023-09-25 | 2023-09-15 → 2023-09-30 | 10 | 5 |
+| ssd_2019_10 | South Sudan | 2019-10-15 | 2019-10-05 → 2019-10-20 | 10 | 5 |
+| tza_2024_04 | Tanzania | 2024-04-15 | 2024-04-05 → 2024-04-20 | 10 | 5 |
+| uga_2019_05 | Uganda | 2019-05-15 | 2019-05-05 → 2019-05-20 | 10 | 5 |
 
-### Two clarifications about the current run
+Each day in the window is still its **own independent BN analysis** with a 7-day
+IMERG antecedent + IFS-ENS forecast out to 7 days; the window only sets which
+target days are run. Earliest day whose forecast reaches the peak is **peak−7**
+(the 7-day forecast horizon), so days peak−10/−9/−8 add build-up context but
+cannot forecast the peak itself. Change the split via `window_pre`/`window_post`
+in `flood_events.yaml` (per-event overrides allowed) and re-run.
 
-1. **It is NOT "15 days before the event."** It is **5 days of lead-in + the
-   peak day + 9 days of aftermath**. Only ~5 forecast inits precede the event,
-   and ~9 days cover the event itself plus the recession. This was a deliberate
-   copy of the Mar-2026 operational layout, not a pre-event-coverage design.
-2. **Each event is anchored to one `peak_date`, not its full duration.** The
-   source page (`#flood-events`) gives only month-level dates + EM-DAT ids; the
-   precise event span (e.g. "12–14 March") is not encoded. `peak_date` in
-   `flood_events.yaml` is the single best-known onset/peak, and the 15-day
-   window is derived from it. So an event's multi-day duration is *not* modelled
-   — it is collapsed to one anchor day.
+### Clarification — anchored to one peak date, not the event duration
 
-### Your idea — weight the window toward *before* the event
+Each event is anchored to a single `peak_date`, not its full multi-day span.
+The source page (`#flood-events`) gives only month-level dates + EM-DAT ids; the
+precise event window (e.g. "12–14 March") is not encoded. `peak_date` in
+`flood_events.yaml` is the single best-known onset/peak, and the 16-day window is
+derived from it — so a multi-day event is collapsed to one anchor day. The wide
+10-day pre-window means a peak estimate that is a few days *late* still covers
+the true event (it falls inside the pre-window).
 
-For an event like **12–14 March 2019**, the current scheme (peak ≈ Mar 13)
-gives `Mar 8 → Mar 27` — only Mar 8–12 (5 days) precede the event. If the goal
-is to explore the **build-up** (antecedent saturation + how early the forecast
-"saw it coming"), a pre-event-weighted window is better. The split is a config
-knob, so any of these is a one-line change:
+### Window history & how to change it
 
-| intent | `window_pre` / `window_post` | window for peak = Mar 13 |
-|--------|:----------------------------:|--------------------------|
-| current (Mar-2026 layout) | 5 / 9 | Mar 8 → Mar 27 |
-| event-centred | 7 / 7 | Mar 6 → Mar 20 |
-| **15 days up to the event** | 14 / 0 | **Feb 27 → Mar 13** |
-| long lead-in + short tail | 11 / 3 | Mar 2 → Mar 16 |
+| window | `pre`/`post` | total | rationale |
+|--------|:------------:|:-----:|-----------|
+| Mar-2026 layout (initial) | 5 / 9 | 15 | copied operational; clipped the build-up |
+| **current** | **10 / 5** | **16** | build-up focus; full 7-day lead-time to peak |
+| event-centred | 7 / 7 | 15 | symmetric |
+| 15 days up to the event | 14 / 0 | 15 | pure pre-event runway |
 
-What actually changes as you add lead-in days:
+What each extra lead-in day adds: the **antecedent** uses a fixed 7-day IMERG
+lookback (so >7–10 pre-event days add no *new* soil-moisture signal), but each
+extra day adds another **forecast init** (covers D→D+7) and lets the **DBN**
+(7-day reset) posterior accumulate. Trade-off: more pre ⇒ fewer post ⇒ less
+recession coverage. **To change:** edit `defaults.window_pre`/`window_post` (or
+per-event overrides) in `flood_events.yaml` and re-run `./run_all_flood_events.sh`
+— no code change; the driver derives the window and `--expect` from it.
 
-- **Antecedent** uses a fixed **7-day** IMERG lookback, so beyond ~7–10
-  pre-event days it adds no *new* soil-moisture signal — but each extra
-  pre-event day adds another **forecast init** (each covers D→D+7), which is
-  exactly what extends the "how many days ahead did the BN flag it" lead-time
-  evaluation you're after.
-- The **DBN** temporal chain resets every **7 days** (lookback = 7), so ~7+
-  lead-in days let the risk posterior accumulate before the event.
-- Trade-off: more pre-event days ⇒ fewer post-event days ⇒ less coverage of the
-  recession and false-alarm decay.
-
-**To switch:** edit `defaults.window_pre` / `window_post` (or add per-event
-overrides) in `flood_events.yaml` and re-run `./run_all_flood_events.sh` — no
-code change needed; the driver already derives the window and the prep accepts
-any date range. WB2 IFS-ENS covers **2016 → 2024**, so even a 14-day pre-event
-window for the earliest event (Eritrea, Aug 2019) has ample preceding forecast
-data.
+> The §1 result showed this run's risk signal still saturates the window edge at
+> day −10 — i.e. the build-up for these wet-season floods runs even longer. A
+> still-longer pre-window would extend the picture, but the cleaner next step is
+> an **anomaly framing** (risk above the seasonal climatology) so the event
+> separates from the background wet-season risk.
 
 ---
 

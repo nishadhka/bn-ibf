@@ -5,7 +5,7 @@ Mar 2026 — see `flood_bn_ibf_run_notes_2026-03.md`) over the **11 historical
 East-Africa flood events** from the GHACOF73 side event
 ([icpac-igad/DevOps-hazard-modeling#flood-events](https://github.com/icpac-igad/DevOps-hazard-modeling#flood-events)).
 
-Each event is run as a **15-day window** `[peak − 5, peak + 9]` (same layout as
+Each event is run as a **16-day window** `[peak − 10, peak + 5]` (an earlier pass used `[peak − 5, peak + 9]`, the same layout as
 the Mar-2026 run, where the event sat at ~day 6 of 15). The BN engine, soft-
 evidence schema, DBN temporal coupling, CRMA cost-loss output, and web-artifact
 generators are **unchanged** — only the forecast data source is swapped.
@@ -72,7 +72,7 @@ icechunk store as in the operational path.
 | `tza_2024_04` | Tanzania | Dar es Salaam | 2024-0203-TZA | 2024-04-15 | 04-10 → 04-24 |
 | `uga_2019_05` | Uganda | nationwide | 2019-0254-UGA | 2019-05-15 | 05-10 → 05-24 |
 
-Peak dates and the 5/9 window split live in `flood_events.yaml`. They are
+Peak dates and the 10/5 window split live in `flood_events.yaml`. They are
 best-known (the source page gives month-level dates + EM-DAT numbers); refine
 against EM-DAT / DesInventar onset dates as needed — the 9-day post-event tail
 absorbs slippage of a few days.
@@ -200,31 +200,33 @@ the heaviest pixel anywhere in East Africa, not necessarily the affected country
 ### 6b. Admin-1 CRMA validation (full BN run)
 
 All 11 events run end-to-end (`./run_all_flood_events.sh`) on the WB2 IFS-ENS
-forecast + IMERG antecedent. The table below gives, per event, the **worst CRMA
-state reached by any admin-1 boundary in the affected country** within the
-15-day window, the day it occurred relative to the event peak, and the number of
-in-country boundaries at Actionable_Risk / Assess-or-worse on that day.
+forecast + IMERG antecedent over the **16-day `[peak−10, peak+5]` window**. The
+table gives, per event, the **worst CRMA state reached by any admin-1 boundary
+in the affected country**, the day it occurred vs the event peak, the in-country
+counts at Actionable_Risk / Assess-or-worse, and the earliest day reaching
+Assess+.
 
-| event | country | peak | worst in-country CRMA | day vs peak | #Actionable_Risk | #Assess+ |
-|-------|---------|------|-----------------------|:-----------:|:----------------:|:--------:|
-| bdi_2024_04 | Burundi | 2024-04-15 | **Actionable_Risk** | −5 | 6 | 6 |
-| dji_2019_11 | Djibouti | 2019-11-21 | **Actionable_Risk** | −5 | 5 | 5 |
-| eri_2019_08 | Eritrea | 2019-08-15 | **Actionable_Risk** | −5 | 5 | 5 |
-| eth_2021_05 | Ethiopia | 2021-05-15 | Assess | −5 | 0 | 2 |
-| ken_2024_04 | Kenya | 2024-04-24 | **Actionable_Risk** | +2 | 15 | 33 |
-| rwa_2023_05 | Rwanda | 2023-05-02 | **Actionable_Risk** | −5 | 2 | 3 |
-| sdn_2019_08 | Sudan | 2019-08-25 | **Actionable_Risk** | −5 | 12 | 16 |
-| som_2023_09 | Somalia | 2023-09-25 | **Actionable_Risk** | +5 | 3 | 3 |
-| ssd_2019_10 | South Sudan | 2019-10-15 | Assess | −2 | 0 | 1 |
-| tza_2024_04 | Tanzania | 2024-04-15 | **Actionable_Risk** | +3 | 11 | 12 |
-| uga_2019_05 | Uganda | 2019-05-15 | **Actionable_Risk** | +6 | 8 | 19 |
+| event | country | peak | worst CRMA | worst day | #AR | #Assess+ | earliest Assess+ |
+|-------|---------|------|------------|:---------:|:---:|:--------:|:----------------:|
+| bdi_2024_04 | Burundi | 2024-04-15 | **Actionable_Risk** | +4 | 6 | 9 | −10 |
+| dji_2019_11 | Djibouti | 2019-11-21 | **Actionable_Risk** | −1 | 6 | 6 | −10 |
+| eri_2019_08 | Eritrea | 2019-08-15 | **Actionable_Risk** | −10 | 6 | 6 | −10 |
+| eth_2021_05 | Ethiopia | 2021-05-15 | **Actionable_Risk** | −10 | 1 | 3 | −10 |
+| ken_2024_04 | Kenya | 2024-04-24 | **Actionable_Risk** | −1 | 21 | 28 | −10 |
+| rwa_2023_05 | Rwanda | 2023-05-02 | **Actionable_Risk** | 0 | 2 | 5 | −10 |
+| sdn_2019_08 | Sudan | 2019-08-25 | **Actionable_Risk** | −10 | 14 | 18 | −10 |
+| som_2023_09 | Somalia | 2023-09-25 | **Actionable_Risk** | −2 | 5 | 5 | −3 |
+| ssd_2019_10 | South Sudan | 2019-10-15 | **Actionable_Risk** | 0 | 2 | 7 | −10 |
+| tza_2024_04 | Tanzania | 2024-04-15 | **Actionable_Risk** | −3 | 13 | 15 | −10 |
+| uga_2019_05 | Uganda | 2019-05-15 | **Actionable_Risk** | +5 | 6 | 15 | −10 |
 
-**9 of 11 events reached Actionable_Risk (Red)** in the affected country; the
-other two (Ethiopia, South Sudan) reached Assess (Orange). Kenya is the
-strongest signal (15 boundaries Red, 33 Assess+ — Nairobi's Rift-Valley/central
-neighbours plus Burundi). Several events peak at day −5 (the window start),
-reflecting that the forecast init at peak−5 already carried the heavy-rain
-signal for the lead-up.
+**All 11 events reach Actionable_Risk (Red)** in the affected country (vs 9/11
+under the earlier 5/9 split — Ethiopia and South Sudan promoted by the longer
+build-up window). Kenya is strongest (21 Red / 28 Assess+). The earliest Assess+
+day is **−10 (window start) for 10 of 11 events** — the elevated-risk window is
+prolonged (wet-season saturation; build-up runs beyond 10 days), so a future
+anomaly framing would separate the event from the seasonal background. See
+`2026-06-09-11flood_events_run_crma_record.md` §1–2 for the full discussion.
 
 ### 6c. Delivery to the crma-api (GCS)
 
@@ -236,9 +238,9 @@ boundary_daily}.parquet` (union by date / date+boundary, preserving Mar-2026).
 `upload_bn_artifacts.py --flood-only` then pushes them to `gs://crma-mdx-store`
 with the `coiled-data-e4drr_202505.json` service account:
 
-- `bn-dag/bn-dag-*.json` — **154** files (139 unique event dates + 15 operational)
-- `parquet/flood_bn_ibf_daily.parquet` — 154 rows (date span 2019-05-10 → 2026-03-15)
-- `parquet/flood_bn_ibf_boundary_daily.parquet` — 34 958 rows (154 dates × 227 boundaries)
+- `bn-dag/bn-dag-*.json` — **162** files (147 unique event dates + 15 operational)
+- `parquet/flood_bn_ibf_daily.parquet` — 162 rows (date span 2019-05-05 → 2026-03-15)
+- `parquet/flood_bn_ibf_boundary_daily.parquet` — 36 774 rows (162 dates × 227 boundaries)
 
 ```bash
 ./consolidate_flood_events.py
