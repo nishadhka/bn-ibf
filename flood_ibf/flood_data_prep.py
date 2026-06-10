@@ -622,6 +622,19 @@ def process_one_date(D, init_ts, out_path: Path, args, *, adm1, n_adm, country,
                          spa=spatial_cov_final, trn_slope=slopes,
                          tail_ratio=max_ratio_p95_adm)
 
+    # A handful of WB2 IFS-ENS inits are entirely missing (all-NaN tp, e.g.
+    # 2019-10-17), which leaves the forecast-derived numeric columns NaN and
+    # would reach the Julia BN as `missing` (Float64(::Missing) crash). The
+    # soft-evidence columns already encode this as a uniform vector (the correct
+    # "no information" handling); fill the remaining hard numeric NaNs with 0 so
+    # the CSV has no missing cells. Antecedent (IMERG) is unaffected on such days.
+    num_cols = df.select_dtypes(include=[np.number]).columns
+    n_nan = int(df[num_cols].isna().to_numpy().sum())
+    if n_nan:
+        df[num_cols] = df[num_cols].fillna(0.0)
+        print(f"[prep] {D.date()}: filled {n_nan} NaN numeric cells with 0 "
+              f"(missing forecast/obs — soft evidence stays uniform)")
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out_path, index=False)
     print(f"[prep] {D.date()} -> {out_path.name}  rows={len(df)}  "
