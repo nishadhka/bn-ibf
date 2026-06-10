@@ -6,6 +6,12 @@ the artifacts it created, and **why the run occupies ~1.5 GB on disk**.
 Companion to `flood_events_run_notes.md` (method, events, results) and
 `flood_bn_ibf_run_notes_2026-03.md` (the operational Mar-2026 run this extends).
 
+> **Version — this records the 16-day `[peak−10, peak+5]` run** (the current one
+> on GCS). An earlier pass used a 15-day `[peak−5, peak+9]` window; it was
+> replaced after the day−5 window-edge effect showed the build-up was being
+> clipped (see §2). All counts below are the 16-day run: 162 dates delivered,
+> all 11 events reach Actionable_Risk in-country.
+
 ---
 
 ## 1. What the run did
@@ -140,7 +146,7 @@ per-event overrides) in `flood_events.yaml` and re-run `./run_all_flood_events.s
 
 | Path | Size | What |
 |------|-----:|------|
-| `wb2_ifs_ens/*/forecast_accums.nc` | **1.4 GB** | 11 collected forecast cubes (50-member duration accums) |
+| `wb2_ifs_ens/*/forecast_accums.nc` | **~1.5 GB** | 11 collected forecast cubes (50-member duration accums) — optional, regenerable cache |
 | `output/bn-dag/*.json` | 19 MB | 154 per-day BN-DAG panel JSONs (139 event + 15 operational) |
 | `output/events/*/` | 48 MB | per-event inputs + DBN CSVs + per-event JSONs/parquet |
 | `output/*.parquet` | <1 MB | merged calendar + choropleth parquet |
@@ -149,28 +155,29 @@ per-event overrides) in `flood_events.yaml` and re-run `./run_all_flood_events.s
 **95 % of the footprint is the 11 forecast cubes.** Everything the BN produces
 (evidence CSVs, DBN posteriors, DAG JSONs, parquets) is only ~68 MB combined.
 
-### Why each cube is ~130 MB
+### Why each cube is ~135 MB
 
 `collect_wb2_ifs_events.py` saves, per event, the **full 50-member ensemble**
-forecast as `tp_accum_mm(init_date, duration, member, lat, lon)`:
+forecast as `tp_accum_mm(init_date, duration, member, lat, lon)` for the 16-day
+window:
 
 ```
- 15 inits × 5 durations × 50 members × 145 lat × 125 lon × 4 bytes (float32)
-   = 271,875,000 values·bytes ≈ 259 MiB uncompressed
-   → ~130 MiB on disk (zlib level-4, ~2× — precip is sparse/mostly small)
- × 11 events ≈ 1.4 GB
+ 16 inits × 5 durations × 50 members × 145 lat × 125 lon × 4 bytes (float32)
+   = 290,000,000 values·bytes ≈ 277 MiB uncompressed
+   → ~135 MiB on disk (zlib level-4, ~2× — precip is sparse/mostly small)
+ × 11 events ≈ 1.5 GB
 ```
 
 The size is driven almost entirely by the **`member` dimension (50×)**. The cube
 keeps every ensemble member so per-member storyline analysis (worst/median/best
 plausible world) is reproducible offline without re-fetching from GCS. The
 forecast field over East Africa is otherwise small (145×125 ≈ 18 k pixels at
-0.25°); it is the 50-member × 15-init × 5-duration product that inflates it.
+0.25°); it is the 50-member × 16-init × 5-duration product that inflates it.
 
 ### Why this is expected, not a leak
 
 - A single deterministic field for one event/day over this box is ~70 KB. The
-  ensemble (50 members) × 15 daily inits × 5 accumulation windows is **3 750×**
+  ensemble (50 members) × 16 daily inits × 5 accumulation windows is **4 000×**
   that — the cost of keeping a *probabilistic, time-resolved* forecast archive.
 - These cubes are the **forecast-collection deliverable** (the `collect` step),
   separate from the BN run itself. The BN only needs them transiently; it
@@ -181,8 +188,10 @@ forecast field over East Africa is otherwise small (145×125 ≈ 18 k pixels at
 
 ## 4. Reducing the footprint (if needed)
 
-The 1.4 GB of cubes is **gitignored** (`flood_ibf/wb2_ifs_ens/**/forecast_accums.nc`)
-and fully regenerable via `./collect_wb2_ifs_events.py`. Options:
+The ~1.5 GB of cubes is **gitignored** (`flood_ibf/wb2_ifs_ens/**/forecast_accums.nc`)
+and fully regenerable via `./collect_wb2_ifs_events.py` (it reads the current
+window from `flood_events.yaml`, so the on-disk copy is whatever window it was
+last collected for — it has no effect on the BN run or the API). Options:
 
 | Action | New size | Trade-off |
 |--------|---------:|-----------|
@@ -193,7 +202,7 @@ and fully regenerable via `./collect_wb2_ifs_events.py`. Options:
 
 The committed git artifacts are unaffected by this — only the BN outputs
 (`output/`, ~68 MB, of which 19 MB of JSON + the parquets are committed) and the
-delivered GCS objects matter for the API. To reclaim the 1.4 GB safely:
+delivered GCS objects matter for the API. To reclaim the ~1.5 GB safely:
 
 ```bash
 rm -rf flood_ibf/wb2_ifs_ens          # cubes only; regenerate with collect_wb2_ifs_events.py
@@ -203,8 +212,8 @@ rm -rf flood_ibf/wb2_ifs_ens          # cubes only; regenerate with collect_wb2_
 
 ## 5. Wall-clock & compute notes
 
-- Per-event ≈ 12–15 min after the range-mode optimization (`5a7a929`): prep
-  ~8 min (15 days × ~30 s) + Julia DBN ~5 min + generators ~1 min.
+- Per-event ≈ 12–16 min after the range-mode optimization (`5a7a929`): prep
+  ~8 min (16 days × ~30 s) + Julia DBN ~5 min + generators ~1 min.
 - The pre-optimization per-day path was ~3–6 min **per day** (each day a fresh
   subprocess re-opening every store and re-running the WB2 lead interpolation 7×)
   ⇒ the 10-event batch would have taken ~17 h; it ran in ~2.5 h instead.
