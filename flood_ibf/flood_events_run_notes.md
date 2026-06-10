@@ -197,15 +197,56 @@ their window — the WB2 IFS-ENS forecast "saw" heavy rain crossing the 2-yr RP 
 each event. These are **domain-wide** statistics; the per-event peak day reflects
 the heaviest pixel anywhere in East Africa, not necessarily the affected country.
 
-### 6b. Admin-1 CRMA validation (pending the BN run)
+### 6b. Admin-1 CRMA validation (full BN run)
 
-The boundary-level CRMA table — peak state in the affected admin-1 around the
-event days, mirroring the Nairobi validation in
-`flood_bn_ibf_run_notes_2026-03.md` §2 — requires the full BN run via
-`./run_flood_event.sh <key>`, which needs `icpac_adm1v3.geojson` and a Julia
-environment (neither present on the collection host).
+All 11 events run end-to-end (`./run_all_flood_events.sh`) on the WB2 IFS-ENS
+forecast + IMERG antecedent. The table below gives, per event, the **worst CRMA
+state reached by any admin-1 boundary in the affected country** within the
+15-day window, the day it occurred relative to the event peak, and the number of
+in-country boundaries at Actionable_Risk / Assess-or-worse on that day.
 
-| event | affected adm-1 | peak CRMA (event window) | lead vs peak | notes |
-|-------|----------------|--------------------------|--------------|-------|
-| ken_2024_04 | Nairobi | _tbd_ | _tbd_ | Apr-2024 Kenya floods |
-| … | | | | |
+| event | country | peak | worst in-country CRMA | day vs peak | #Actionable_Risk | #Assess+ |
+|-------|---------|------|-----------------------|:-----------:|:----------------:|:--------:|
+| bdi_2024_04 | Burundi | 2024-04-15 | **Actionable_Risk** | −5 | 6 | 6 |
+| dji_2019_11 | Djibouti | 2019-11-21 | **Actionable_Risk** | −5 | 5 | 5 |
+| eri_2019_08 | Eritrea | 2019-08-15 | **Actionable_Risk** | −5 | 5 | 5 |
+| eth_2021_05 | Ethiopia | 2021-05-15 | Assess | −5 | 0 | 2 |
+| ken_2024_04 | Kenya | 2024-04-24 | **Actionable_Risk** | +2 | 15 | 33 |
+| rwa_2023_05 | Rwanda | 2023-05-02 | **Actionable_Risk** | −5 | 2 | 3 |
+| sdn_2019_08 | Sudan | 2019-08-25 | **Actionable_Risk** | −5 | 12 | 16 |
+| som_2023_09 | Somalia | 2023-09-25 | **Actionable_Risk** | +5 | 3 | 3 |
+| ssd_2019_10 | South Sudan | 2019-10-15 | Assess | −2 | 0 | 1 |
+| tza_2024_04 | Tanzania | 2024-04-15 | **Actionable_Risk** | +3 | 11 | 12 |
+| uga_2019_05 | Uganda | 2019-05-15 | **Actionable_Risk** | +6 | 8 | 19 |
+
+**9 of 11 events reached Actionable_Risk (Red)** in the affected country; the
+other two (Ethiopia, South Sudan) reached Assess (Orange). Kenya is the
+strongest signal (15 boundaries Red, 33 Assess+ — Nairobi's Rift-Valley/central
+neighbours plus Burundi). Several events peak at day −5 (the window start),
+reflecting that the forecast init at peak−5 already carried the heavy-rain
+signal for the lead-up.
+
+### 6c. Delivery to the crma-api (GCS)
+
+`consolidate_flood_events.py` stages every event's `bn-dag-YYYY-MM-DD.json` into
+the flat `output/bn-dag/` dir (event dates 2019–2024 are distinct from the
+operational 2026-03 set; intra-event same-date files are byte-identical) and
+**merges** the event dates into the operational `flood_bn_ibf_{daily,
+boundary_daily}.parquet` (union by date / date+boundary, preserving Mar-2026).
+`upload_bn_artifacts.py --flood-only` then pushes them to `gs://crma-mdx-store`
+with the `coiled-data-e4drr_202505.json` service account:
+
+- `bn-dag/bn-dag-*.json` — **154** files (139 unique event dates + 15 operational)
+- `parquet/flood_bn_ibf_daily.parquet` — 154 rows (date span 2019-05-10 → 2026-03-15)
+- `parquet/flood_bn_ibf_boundary_daily.parquet` — 34 958 rows (154 dates × 227 boundaries)
+
+```bash
+./consolidate_flood_events.py
+GOOGLE_APPLICATION_CREDENTIALS=../coiled-data-e4drr_202505.json \
+  uv run python3 ../upload_bn_artifacts.py --flood-only [--dry-run]
+```
+
+> **Note on a missing forecast init:** a handful of WB2 IFS-ENS inits are
+> entirely NaN (e.g. 2019-10-17). The prep fills those forecast columns with 0
+> and the soft-evidence columns stay uniform (the correct "no information"
+> handling), so the BN that day is driven by antecedent + DBN carry-over.
