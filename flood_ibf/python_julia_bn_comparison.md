@@ -95,6 +95,62 @@ This is semantically equivalent but architecturally different — it collapses t
 
 **Julia:** CPTs are built by `build_risk_cpt()` and `build_action_cpt()` as standalone matrices, passed explicitly to inference. They can be precomputed once and reused across multiple runs without re-instantiating any model object.
 
+### 2.6 The `confidence` column — realigned, and now identical
+
+**This one changed emitted numbers, not just implementation.** Both sides have
+been fixed; the entry stays because the old values are still on disk in every
+`julia_risk_*.csv` written before this.
+
+**Was**, in both: `confidence = max(action_probs)` — the peak of the **action**
+distribution.
+
+**Now**, in both: `posterior_confidence(risk_probs) = 1 − H/H_max` — the
+sharpness of the risk posterior.
+
+The old definition read off the action node, which the Julia file marks
+`# deprecated (Layer-2 leakage)`. So it reported how peaked a deprecated
+distribution was, not how uncertain the hazard belief is: **a boundary with a
+flat, genuinely uncertain risk posterior could report high confidence.** The
+entropy form scores a flat posterior 0 regardless of which state edges ahead,
+and is computed on the same distribution `compute_crma_state` reads, so the
+confidence and the state describe one object.
+
+Measured on init 2026-03-03, 275 rows, identical flags — `confidence` is the
+**only** column that changes; `risk_level`, `crma_state`, `traffic_light` and
+all ten probability columns are byte-identical:
+
+| | old (max action prob) | new (entropy sharpness) |
+|---|---|---|
+| mean | 0.540 | 0.368 |
+| range | 0.372 – 0.760 | 0.148 – 0.509 |
+| correlation with posterior entropy | −0.865 | **−1.000** (by construction) |
+
+Rank correlation between old and new is **+0.910**, so the *ordering* of
+boundaries by confidence is largely preserved — but the levels drop by ~0.17.
+**Anything comparing this column against a fixed numeric threshold, or plotting
+it on a fixed 0–1 colour scale, needs recalibrating.** Known consumers —
+`summarize_bn.py` (`mean_confidence`), `plot_bn_dag_per_day.py` and
+`plot_nairobi_diagnostic.py` — only report or print the value, so none break.
+
+**Parity is verified, not assumed.** `posterior_confidence` in
+`flood_bn_ibf_v1.py:219` and in `flood_bn_ibf_v1.jl` agree to **2.2e-16**
+(1 ULP) across nine cases, edge cases included:
+
+| input | value |
+|---|---|
+| flat `[0.2]*5` | 0.000000000000000 |
+| one-hot | 1.000000000000000 |
+| `[0, 0, .1, .1, .8]` | 0.602947181302750 |
+| `[.97, .01, .01, .005, .005]` | 0.891495032336291 |
+| all zeros | 0.0 — guarded, not `NaN` |
+| unnormalised `[2.0]*5` | 0.0 — normalised first |
+
+Both normalise before taking entropy, both floor the log argument at `1e-12`,
+both clamp to `[0, 1]`, and both use natural log — which cancels in `H/log k`,
+so the base is not a divergence risk. **If either is edited, re-run this
+comparison.** The whole reason this section exists is that the two drifted once
+already, and the divergence was invisible because nothing compared them.
+
 ---
 
 ## 3. Where Julia Could Drastically Diverge

@@ -132,6 +132,33 @@ function categorize_tail_risk(max_ratio::Float64)::Int
 end
 
 """
+Sharpness of a posterior: 1 - H/H_max in [0,1] (H_max = log k for k states).
+
+This replaces `confidence = maximum(action_probs)`, which was read off the
+action node -- a node this file itself marks deprecated (Layer-2 leakage), so
+the emitted `confidence` reported how peaked a deprecated distribution was
+rather than how uncertain the hazard belief is.  A basin with a flat, genuinely
+uncertain risk posterior could report high confidence.
+
+Entropy is the honest measure: a flat posterior (we know nothing) scores 0
+regardless of which state happens to edge ahead, and only a genuinely peaked
+belief scores near 1.  It is a statement about the *quality of the belief*,
+which is what CRMA is accountable for.
+
+Computed on `risk_probs` -- the same distribution `compute_crma_state` reads --
+so the confidence and the state it accompanies describe one object.
+"""
+function posterior_confidence(probs::Vector{Float64})::Float64
+    k = length(probs)
+    k <= 1 && return 1.0
+    s = sum(probs)
+    s > 0 || return 0.0
+    p = probs ./ s
+    H = -sum(x * log(max(x, 1e-12)) for x in p)
+    return clamp(1.0 - H / log(k), 0.0, 1.0)
+end
+
+"""
 Compute the CRMA risk-assessment state from the risk_level posterior
 using a cost-loss-ratio based trigger rule.
 
@@ -718,7 +745,7 @@ function _assemble_result(b::BoundaryInput, ant_idx::Int, tre_idx::Int,
         risk_probs,
         ACTION_STATES[argmax(action_probs)],
         action_probs,
-        maximum(action_probs),
+        posterior_confidence(risk_probs),
         crma_state, crma_expl, traffic_light,
     )
 end
@@ -832,6 +859,18 @@ function self_test()
     entropy_low  = -sum(p * log(max(p, 1e-10)) for p in rp_low)
     @info "Test 4 (agreement effect):" entropy_high entropy_low
     @assert entropy_low > entropy_high "Low agreement should increase entropy"
+
+    # Test case 5: entropy confidence.  Flat posterior scores 0, one-hot scores
+    # 1, and -- the property that matters operationally -- the SAME evidence
+    # under low ensemble agreement must score lower than under high agreement.
+    # The old `maximum(action_probs)` could not see that: it read a deprecated
+    # node and was blind to how spread the risk belief actually was.
+    @assert posterior_confidence(fill(0.2, 5)) < 1e-9 "flat posterior must score zero confidence"
+    @assert posterior_confidence(onehot(3, 5)) > 1.0 - 1e-9 "one-hot posterior must score full confidence"
+    conf_mid = posterior_confidence([0.0, 0.0, 0.1, 0.1, 0.8])
+    @assert 0.0 < conf_mid < 1.0 "a peaked-but-spread posterior sits strictly between"
+    @assert posterior_confidence(rp_low) < posterior_confidence(rp_high) "Low agreement must lower confidence"
+    @info "Test 5 (entropy confidence):" flat=posterior_confidence(fill(0.2, 5)) peaked=round(conf_mid, digits=3) conf_low=round(posterior_confidence(rp_low), digits=3) conf_high=round(posterior_confidence(rp_high), digits=3)
 
     @info "All self-tests passed!"
 end

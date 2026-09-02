@@ -216,6 +216,36 @@ def compute_severity_index(eprobs: Dict[str, float]) -> float:
     return min(1.0, base_prob + boost)
 
 
+def posterior_confidence(probs) -> float:
+    """
+    Sharpness of a posterior: 1 - H/H_max in [0, 1] (H_max = log k for k states).
+
+    This replaces ``confidence = np.max(action_probs)``, which was read off the
+    action node -- a node the Julia port marks deprecated (Layer-2 leakage), so
+    the emitted ``confidence`` reported how peaked a deprecated distribution was
+    rather than how uncertain the hazard belief is.  A boundary with a flat,
+    genuinely uncertain risk posterior could report high confidence.
+
+    Entropy is the honest measure: a flat posterior (we know nothing) scores 0
+    regardless of which state happens to edge ahead, and only a genuinely peaked
+    belief scores near 1.  It is a statement about the *quality of the belief*.
+
+    Computed on ``risk_probs`` so that this matches `posterior_confidence` in
+    `flood_bn_ibf_v1.jl` exactly -- see `python_julia_bn_comparison.md` section
+    2.6.  The two implementations must not drift again.
+    """
+    p = np.asarray(probs, dtype=float).ravel()
+    k = p.size
+    if k <= 1:
+        return 1.0
+    total = p.sum()
+    if not total > 0:
+        return 0.0
+    p = p / total
+    H = -np.sum(p * np.log(np.maximum(p, 1e-12)))
+    return float(np.clip(1.0 - H / np.log(k), 0.0, 1.0))
+
+
 # ============================================================================
 # DATA LOADER
 # ============================================================================
@@ -938,7 +968,7 @@ class FloodBayesianNetworkV1:
             'risk_probabilities': dict(zip(risk_states, risk_probs)),
             'action_probabilities': dict(zip(action_states, action_probs)),
             'recommended_action': recommended_action,
-            'confidence': float(np.max(action_probs))
+            'confidence': posterior_confidence(risk_probs)
         }
 
     def process_all_boundaries(self, boundaries_data: List[Dict]) -> pd.DataFrame:
