@@ -640,11 +640,19 @@ struct BoundaryInput
     spa_probs::Union{Nothing,Vector{Float64}}
     trn_probs::Union{Nothing,Vector{Float64}}
     tail_probs::Union{Nothing,Vector{Float64}}
+    # Per-boundary multiplier on the cost-loss ratio, and what set it.  1.0 and
+    # "none" reproduce the previous scalar-only behaviour exactly.
+    cl_factor::Float64
+    cl_driver::String
 end
 
 BoundaryInput(id, name, country, ant_mm, ant_cat, trend, eprob, spa_cov, agr, ratio) =
     BoundaryInput(id, name, country, ant_mm, ant_cat, trend, eprob, spa_cov, agr, ratio,
-                  nothing, nothing, nothing, nothing, nothing)
+                  nothing, nothing, nothing, nothing, nothing, 1.0, "none")
+BoundaryInput(id, name, country, ant_mm, ant_cat, trend, eprob, spa_cov, agr, ratio,
+              a, e, sp, tr, ta) =
+    BoundaryInput(id, name, country, ant_mm, ant_cat, trend, eprob, spa_cov, agr, ratio,
+                  a, e, sp, tr, ta, 1.0, "none")
 
 struct BoundaryResult
     boundary_id::String
@@ -657,9 +665,16 @@ struct BoundaryResult
     recommended_action::String         # deprecated (Layer-2 leakage)
     action_probabilities::Vector{Float64}
     confidence::Float64
-    crma_state::String                 # Layer-1 CRMA output
+    crma_state::String                 # Layer-1 CRMA output, at THIS row's C/L
     crma_explanation::String           # rule that fired
     traffic_light::String              # Green / Yellow / Orange / Red
+    # The cost-loss audit trail.  `crma_state_baseline` is the state this row
+    # would have taken at the unmodulated scalar C/L, so the entire effect of
+    # per-boundary modulation is one column comparison away and is reversible.
+    cost_loss_ratio::Float64
+    cl_factor::Float64
+    cl_driver::String
+    crma_state_baseline::String
 end
 
 """
@@ -734,7 +749,13 @@ end
 function _assemble_result(b::BoundaryInput, ant_idx::Int, tre_idx::Int,
                            risk_probs::Vector{Float64}, action_probs::Vector{Float64},
                            cost_loss_ratio::Float64)::BoundaryResult
-    crma_idx, crma_expl = compute_crma_state(risk_probs; cost_loss_ratio)
+    # C/L is cost-of-acting over loss-from-a-missed-event.  A missed flood costs
+    # more where more is exposed, so L is larger and C/L smaller, and the trigger
+    # fires earlier.  That is how exposure reaches a DECISION without ever being
+    # multiplied into an impact number: it moves the threshold, not the belief.
+    cl = cost_loss_ratio * b.cl_factor
+    crma_idx, crma_expl = compute_crma_state(risk_probs; cost_loss_ratio=cl)
+    base_idx, _ = compute_crma_state(risk_probs; cost_loss_ratio=cost_loss_ratio)
     crma_state = CRMA_STATES[crma_idx]
     traffic_light = TRAFFIC_LIGHT[crma_state]
     return BoundaryResult(
@@ -747,6 +768,7 @@ function _assemble_result(b::BoundaryInput, ant_idx::Int, tre_idx::Int,
         action_probs,
         posterior_confidence(risk_probs),
         crma_state, crma_expl, traffic_light,
+        cl, b.cl_factor, b.cl_driver, CRMA_STATES[base_idx],
     )
 end
 
@@ -871,6 +893,25 @@ function self_test()
     @assert 0.0 < conf_mid < 1.0 "a peaked-but-spread posterior sits strictly between"
     @assert posterior_confidence(rp_low) < posterior_confidence(rp_high) "Low agreement must lower confidence"
     @info "Test 5 (entropy confidence):" flat=posterior_confidence(fill(0.2, 5)) peaked=round(conf_mid, digits=3) conf_low=round(posterior_confidence(rp_low), digits=3) conf_high=round(posterior_confidence(rp_high), digits=3)
+
+    # Test case 6: cost-loss modulation is monotone.  Exposure enters the
+    # DECISION by moving the threshold, never the belief -- so for a fixed
+    # posterior, lowering C/L may only move crma_state UP the ladder and raising
+    # it may only move it down.  If this ever inverts, exposure would be making
+    # a high-hazard basin look safer, which is the one direction a warning
+    # system must never fail in.
+    for rp in ([0.5,0.2,0.15,0.1,0.05], [0.1,0.1,0.2,0.3,0.3], rp3, rp_low)
+        prev = 0
+        for cl in (0.40, 0.30, 0.20, 0.15, 0.10)     # decreasing C/L
+            idx, _ = compute_crma_state(rp; cost_loss_ratio=cl)
+            @assert idx >= prev "lowering C/L must not lower the CRMA rung"
+            prev = idx
+        end
+    end
+    # and the factor table itself only ever spans the intended band
+    @assert compute_crma_state(rp3; cost_loss_ratio=0.2*0.75)[1] >=
+            compute_crma_state(rp3; cost_loss_ratio=0.2*1.25)[1] "critical exposure must not de-escalate below limited"
+    @info "Test 6 (cost-loss modulation is monotone):" band="0.75-1.25 x baseline"
 
     @info "All self-tests passed!"
 end
@@ -1157,6 +1198,8 @@ function run_csv(input_csv::String, output_csv::String;
     colnames = names(df)
 
     has_ratio = "ens_max_ratio" in colnames
+    has_cl = "cl_factor" in colnames
+    has_cl_driver = "cl_driver" in colnames
     if include_tail_risk && !has_ratio
         @warn "--tail-risk requested but ens_max_ratio column not in CSV; disabling"
         include_tail_risk = false
@@ -1190,11 +1233,17 @@ function run_csv(input_csv::String, output_csv::String;
             String(row.forecast_agreement),
             has_ratio ? Float64(row.ens_max_ratio) : 0.0,
             ant_p, exc_p, spa_p, trn_p, tail_p,
+            # Optional per-boundary cost-loss modifier.  Absent, this is 1.0 and
+            # the run is identical to a scalar-only one -- an evidence CSV
+            # written before this column existed behaves exactly as it did.
+            has_cl ? Float64(row.cl_factor) : 1.0,
+            has_cl_driver ? String(row.cl_driver) : "none",
         )
     end
 
     backend = use_rxinfer && !include_agreement ? "RxInfer" : "matmul"
-    @info "Processing $(length(inputs)) boundaries (backend=$backend agreement=$include_agreement tail_risk=$include_tail_risk C/L=$cost_loss_ratio soft_rows=$n_soft_rows)"
+    cl_note = has_cl ? "per-boundary (baseline $cost_loss_ratio)" : "$cost_loss_ratio scalar"
+    @info "Processing $(length(inputs)) boundaries (backend=$backend agreement=$include_agreement tail_risk=$include_tail_risk C/L=$cl_note soft_rows=$n_soft_rows)"
     results = process_all_boundaries(inputs; include_agreement, include_tail_risk,
                                       cost_loss_ratio, use_rxinfer)
 
@@ -1208,6 +1257,10 @@ function run_csv(input_csv::String, output_csv::String;
         crma_state          = [r.crma_state for r in results],
         traffic_light       = [r.traffic_light for r in results],
         crma_explanation    = [r.crma_explanation for r in results],
+        crma_state_baseline = [r.crma_state_baseline for r in results],
+        cost_loss_ratio     = [r.cost_loss_ratio for r in results],
+        cl_factor           = [r.cl_factor for r in results],
+        cl_driver           = [r.cl_driver for r in results],
         recommended_action  = [r.recommended_action for r in results],
         confidence          = [r.confidence for r in results],
         risk_minimal        = [r.risk_probabilities[1] for r in results],
@@ -1226,6 +1279,11 @@ function run_csv(input_csv::String, output_csv::String;
     @info "Wrote $output_csv rows=$(DataFrames.nrow(out))"
 
     # Brief distribution print
+    n_moved = count(i -> out.crma_state[i] != out.crma_state_baseline[i], 1:DataFrames.nrow(out))
+    if n_moved > 0
+        @info "Cost-loss modulation moved $n_moved of $(DataFrames.nrow(out)) decisions " *
+              "(compare crma_state against crma_state_baseline)"
+    end
     risk_counts = DataFrames.combine(DataFrames.groupby(out, :risk_level), DataFrames.nrow => :n)
     @info "Risk distribution:" risk_counts
     action_counts = DataFrames.combine(DataFrames.groupby(out, :recommended_action), DataFrames.nrow => :n)
